@@ -1,0 +1,21 @@
+{
+  "name": "@local/token-daily-stats",
+  "version": "1.2.0",
+  "private": true,
+  "description": "Token usage statistics by day and model, shown in DSH settings.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

@@ -1,0 +1,3 @@
+- insert:
+    - id: token-daily-stats
+      name: '@local/token-daily-stats'
