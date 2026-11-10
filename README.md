@@ -1,4 +1,4 @@
-﻿# DSH DeepSeek 自定义插件集
+# DSH DeepSeek 自定义插件集
 
 面向 [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) 的开源 bundle 插件集合，按 dsh 的本地 bundle 规范组织为 monorepo：
 
@@ -18,7 +18,7 @@ packages/
 - 显示会话状态图标与相对更新时间；当前会话高亮并自动滚动定位；
 - 单击会话：打开会话，并在左侧“工作区”会话树中滚动定位（必要时自动展开工作区分组）；
 - 悬停显示与宿主一致的信息卡（标题 / 工作区文件夹路径 / 相对时间 / 状态）；
-- 右键菜单：新建会话（该工作区）、复制 Session ID、打开所在文件夹、归档会话。
+- 右键菜单：新建会话（该工作区）、重命名会话、复制 Session ID、打开所在文件夹、归档会话。
 
 细节见 [packages/recent-sessions/README.md](packages/recent-sessions/README.md)。
 

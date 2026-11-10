@@ -27,6 +27,12 @@ window.__ModuleLoader__.load({
       'menu.copySessionId': 'Copy session ID',
       'menu.copySessionIdError': 'Could not copy the session ID',
       'menu.sessionIdCopied': 'Session ID copied',
+      'menu.rename': 'Rename session',
+      'rename.title': 'Rename session',
+      'rename.confirm': 'OK',
+      'rename.cancel': 'Cancel',
+      'rename.empty': 'Name cannot be empty',
+      'rename.failed': 'Could not rename the session',
     };
     const zh = {
       title: '最近会话',
@@ -43,6 +49,12 @@ window.__ModuleLoader__.load({
       'menu.copySessionId': '复制 Session ID',
       'menu.copySessionIdError': '复制 Session ID 失败',
       'menu.sessionIdCopied': 'Session ID 已复制',
+      'menu.rename': '重命名会话',
+      'rename.title': '重命名会话',
+      'rename.confirm': '确定',
+      'rename.cancel': '取消',
+      'rename.empty': '名称不能为空',
+      'rename.failed': '重命名失败',
     };
 
     /** Expanded panel height: 32px header + 150px list + 4px bottom padding. */
@@ -92,6 +104,16 @@ window.__ModuleLoader__.load({
       '.rsx-hc-path{font-size:12px;line-height:1.5;color:rgba(255,255,255,.75);word-break:break-all}',
       '.rsx-hc-time{font-size:12px;line-height:1.5;color:rgba(255,255,255,.75)}',
       '.rsx-hc-status{display:flex;align-items:center;gap:5px;font-size:12px;line-height:1.5;color:rgba(255,255,255,.82);margin-top:2px}',
+      '.rsx-mask{position:fixed;inset:0;z-index:70;background:rgba(0,0,0,.28);display:flex;align-items:center;justify-content:center}',
+      '.rsx-dialog{width:360px;box-sizing:border-box;background:var(--dsw-alias-bg-overlay);border:0.5px solid var(--dsw-alias-border-l1);border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.22);padding:14px;color:var(--dsw-alias-label-primary);font-family:inherit}',
+      '.rsx-dialog-title{font-size:14px;font-weight:600;margin-bottom:10px}',
+      '.rsx-input{width:100%;box-sizing:border-box;height:34px;padding:0 10px;border-radius:8px;border:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-size:13px;outline:none}',
+      '.rsx-input:focus{border-color:var(--dsw-alias-brand-primary)}',
+      '.rsx-dialog-error{color:var(--dsw-alias-state-error-primary);font-size:12px;margin-top:8px}',
+      '.rsx-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}',
+      '.rsx-btn{height:30px;padding:0 12px;border-radius:7px;border:0.5px solid var(--dsw-alias-border-l1);background:transparent;color:var(--dsw-alias-label-primary);cursor:pointer;font-size:13px}',
+      '.rsx-btn.primary{background:var(--dsw-alias-brand-primary);border-color:transparent;color:#fff}',
+      '.rsx-btn:disabled{opacity:.5;cursor:default}',
     ].join('');
 
     function Chevron({ open }) {
@@ -168,6 +190,23 @@ window.__ModuleLoader__.load({
       return h('svg', { viewBox: '0 0 16 16', width: 16, height: 16, fill: 'none', 'aria-hidden': true },
         h('rect', { x: 5.5, y: 5.5, width: 7, height: 8, rx: 1.3, stroke: 'currentColor', strokeWidth: 1.3 }),
         h('path', { d: 'M10.5 5.5v-1A1.5 1.5 0 0 0 9 3H4a1.5 1.5 0 0 0-1.5 1.5v6A1.5 1.5 0 0 0 4 12h1', stroke: 'currentColor', strokeWidth: 1.3 }));
+    }
+
+    function RenameIcon() {
+      if (typeof ui.IconEditOutlineRegular === 'function') return h(ui.IconEditOutlineRegular, {});
+      return h('svg', { viewBox: '0 0 16 16', width: 16, height: 16, fill: 'none', 'aria-hidden': true },
+        h('path', { d: 'M3 13l.7-3.2L11 2.5a1.6 1.6 0 0 1 2.3 0l.2.2a1.6 1.6 0 0 1 0 2.3L6.2 12.3 3 13z', stroke: 'currentColor', strokeWidth: 1.3, strokeLinejoin: 'round' }));
+    }
+
+    /** Minimal observable request used to open the rename dialog from the menu. */
+    function createRenameStore() {
+      let value = null;
+      const listeners = new Set();
+      return {
+        get: () => value,
+        set: (next) => { value = next; for (const listener of listeners) listener(); },
+        subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
+      };
     }
 
     /** Find a rendered workspace-browser row by its data-row-key. */
@@ -301,12 +340,51 @@ window.__ModuleLoader__.load({
       const useSessionStatus = props.useSessionStatus;
       const openSession = props.openSession;
       const openMenu = props.openMenu;
+      const renameStore = props.renameStore;
+      const renameSession = props.renameSession;
       const tw = typeof props.tw === 'function' ? props.tw : (key) => key;
       const t = typeof props.t === 'function' ? props.t : (key) => key;
       const [collapsed, setCollapsed] = React.useState(false);
       const [rect, setRect] = React.useState(null);
       const [tip, setTip] = React.useState(null);
+      const [renameState, setRenameState] = React.useState(renameStore ? renameStore.get() : null);
+      const [renameDraft, setRenameDraft] = React.useState('');
+      const [renameBusy, setRenameBusy] = React.useState(false);
+      const [renameError, setRenameError] = React.useState('');
       const listRef = React.useRef(null);
+
+      React.useEffect(() => {
+        if (!renameStore) return undefined;
+        setRenameState(renameStore.get());
+        return renameStore.subscribe(() => setRenameState(renameStore.get()));
+      }, [renameStore]);
+
+      React.useEffect(() => {
+        if (renameState) {
+          setRenameDraft(renameState.currentTitle || '');
+          setRenameError('');
+          setRenameBusy(false);
+        }
+      }, [renameState]);
+
+      const closeRename = () => {
+        if (!renameBusy && renameStore) renameStore.set(null);
+      };
+      const confirmRename = async () => {
+        if (renameState == null) return;
+        const title = renameDraft.trim();
+        if (title === '') { setRenameError(t('rename.empty')); return; }
+        if (typeof renameSession !== 'function') { setRenameError(t('rename.failed')); return; }
+        setRenameBusy(true);
+        setRenameError('');
+        try {
+          await renameSession(renameState.sessionId, title);
+          if (renameStore) renameStore.set(null);
+        } catch (_e) {
+          setRenameError(t('rename.failed'));
+          setRenameBusy(false);
+        }
+      };
 
       const sessions = typeof useSessions === 'function' ? useSessions((s) => s) : undefined;
       const workspaces = typeof useWorkspaces === 'function' ? useWorkspaces((s) => s) : undefined;
@@ -515,6 +593,36 @@ window.__ModuleLoader__.load({
               h('span', null, st.label))));
       }
 
+      let dialog = null;
+      if (renameState != null) {
+        dialog = h('div', {
+            className: 'rsx-mask',
+            onMouseDown: (e) => { if (e.target === e.currentTarget) closeRename(); },
+          },
+          h('div', {
+              className: 'rsx-dialog',
+              role: 'dialog',
+              'aria-modal': 'true',
+              'aria-label': t('rename.title'),
+              onMouseDown: (e) => e.stopPropagation(),
+            },
+            h('div', { className: 'rsx-dialog-title' }, t('rename.title')),
+            h('input', {
+              className: 'rsx-input',
+              value: renameDraft,
+              autoFocus: true,
+              onChange: (e) => setRenameDraft(e.target.value),
+              onKeyDown: (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); confirmRename(); }
+                else if (e.key === 'Escape') { e.preventDefault(); closeRename(); }
+              },
+            }),
+            renameError ? h('div', { className: 'rsx-dialog-error' }, renameError) : null,
+            h('div', { className: 'rsx-dialog-actions' },
+              h('button', { type: 'button', className: 'rsx-btn', disabled: renameBusy, onClick: closeRename }, t('rename.cancel')),
+              h('button', { type: 'button', className: 'rsx-btn primary', disabled: renameBusy, onClick: confirmRename }, t('rename.confirm')))));
+      }
+
       const style = rect == null
         ? { display: 'none' }
         : { top: rect.top + 'px', left: rect.left + 'px', width: rect.width + 'px' };
@@ -523,7 +631,8 @@ window.__ModuleLoader__.load({
         h('style', { key: 'rsx-style' }, CSS),
         header,
         body,
-        tooltip);
+        tooltip,
+        dialog);
     }
 
     return {
@@ -548,12 +657,19 @@ window.__ModuleLoader__.load({
         const t = ctx.locale.bind(NS);
         const sessionsService = ctx.get('sessions');
         const workspacesService = ctx.get('workspaces');
+        const renameStore = createRenameStore();
+        const renameSession = async (sessionId, title) => {
+          if (sessionsService == null || typeof sessionsService.using !== 'function') throw new Error('sessions service unavailable');
+          const result = await sessionsService.using(sessionId, { source: 'workspaceOperation' }, (reference) => reference.binding.session.rename(title));
+          if (result == null || result.ok !== true) throw new Error(result && result.error ? result.error.message : 'rename failed');
+        };
         if (contextMenus != null && typeof contextMenus.register === 'function') {
           ctx.slots.inject('contextMenu.icon', function* () {
             yield ctx.slots.register({ name: 'contextMenu.icon', key: 'recent-sessions.folder' }, FolderIcon);
             yield ctx.slots.register({ name: 'contextMenu.icon', key: 'recent-sessions.new-session' }, NewSessionIcon);
             yield ctx.slots.register({ name: 'contextMenu.icon', key: 'recent-sessions.archive' }, ArchiveIcon);
             yield ctx.slots.register({ name: 'contextMenu.icon', key: 'recent-sessions.copy' }, CopyIcon);
+            yield ctx.slots.register({ name: 'contextMenu.icon', key: 'recent-sessions.rename' }, RenameIcon);
           });
           ctx.effect(() => contextMenus.register({
             id: 'recent-sessions.menu',
@@ -586,6 +702,15 @@ window.__ModuleLoader__.load({
                   },
                 });
               }
+              actions.push({
+                id: 'rename-session',
+                label: t('menu.rename'),
+                icon: { key: 'recent-sessions.rename' },
+                run: () => {
+                  const currentTitle = summary && typeof summary.title === 'string' ? summary.title : '';
+                  renameStore.set({ sessionId, currentTitle });
+                },
+              });
               actions.push({
                 id: 'copy-session-id',
                 label: t('menu.copySessionId'),
@@ -638,7 +763,7 @@ window.__ModuleLoader__.load({
           id: 'local.recent-sessions',
           order: 50,
           locale: NS,
-          inject: () => ({ openSession, tw, openMenu }),
+          inject: () => ({ openSession, tw, openMenu, renameStore, renameSession }),
         }, RecentSessionsPanel));
       },
     };
