@@ -18,13 +18,29 @@ window.__ModuleLoader__.load({
       .rbm-title { margin: 0; color: var(--dsw-alias-label-primary); font-size: 18px; font-weight: 600; line-height: 1.4; }
       .rbm-sub { margin: 0; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 1.6; }
       .rbm-card { background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+      .rbm-card-off { opacity: .72; }
       .rbm-card-head { display: flex; flex-direction: column; gap: 3px; }
+      .rbm-card-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
       .rbm-card-title { color: var(--dsw-alias-label-primary); font-size: 13px; font-weight: 600; line-height: 1.4; }
       .rbm-card-desc { color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 1.5; }
+      .rbm-card-note { color: var(--dsw-alias-state-warn-primary); font-size: 11px; line-height: 1.5; }
+      .rbm-switch { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; flex: none; }
+      .rbm-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+      .rbm-switch-track { position: relative; width: 34px; height: 19px; border-radius: 999px; background: var(--dsw-alias-border-l2); transition: background .15s ease; flex: none; }
+      .rbm-switch-thumb { position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%; background: var(--dsw-alias-bg-base); transition: transform .15s ease; }
+      .rbm-switch input:checked + .rbm-switch-track { background: var(--dsw-alias-brand-primary); }
+      .rbm-switch input:checked + .rbm-switch-track .rbm-switch-thumb { transform: translateX(15px); }
+      .rbm-switch input:focus-visible + .rbm-switch-track { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+      .rbm-switch-label { color: var(--dsw-alias-label-secondary); font-size: 11px; }
       .rbm-row { display: grid; grid-template-columns: 92px minmax(0, 1fr); align-items: center; gap: 10px; }
       .rbm-label { color: var(--dsw-alias-label-secondary); font-size: 12px; }
       .rbm-select { width: 100%; min-width: 0; box-sizing: border-box; appearance: auto; background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; padding: 6px 8px; }
       .rbm-select:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+      .rbm-select:disabled, .rbm-input:disabled { cursor: not-allowed; opacity: .6; }
+      .rbm-timeout { display: flex; align-items: center; gap: 6px; }
+      .rbm-input { width: 96px; box-sizing: border-box; background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; padding: 6px 8px; }
+      .rbm-input:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+      .rbm-unit { color: var(--dsw-alias-label-secondary); font-size: 12px; }
       .rbm-current { color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 1.5; }
       .rbm-current code { color: var(--dsw-alias-label-primary); font-size: 11px; }
       .rbm-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
@@ -44,14 +60,37 @@ window.__ModuleLoader__.load({
 
     function cloneRoute(route) {
       return {
+        enabled: route && typeof route.enabled === 'boolean' ? route.enabled : true,
         provider: route && typeof route.provider === 'string' ? route.provider : '',
         model: route && typeof route.model === 'string' ? route.model : '',
         reasoningEffort: route && typeof route.reasoningEffort === 'string' ? route.reasoningEffort : '',
+        timeoutMs: route && typeof route.timeoutMs === 'number' ? route.timeoutMs : 180000,
       }
     }
 
     function cloneDraft(config) {
       return { reviewer: cloneRoute(config && config.reviewer), arbiter: cloneRoute(config && config.arbiter) }
+    }
+
+    // Timeout is edited in seconds for readability; the Host stores milliseconds.
+    function toSeconds(ms) {
+      return String(Math.round((typeof ms === 'number' && ms > 0 ? ms : 180000) / 1000))
+    }
+
+    function fromSeconds(text) {
+      const parsed = Number.parseInt(String(text).trim(), 10)
+      if (!Number.isFinite(parsed)) return undefined
+      return parsed * 1000
+    }
+
+    function toRoutePayload(route) {
+      return {
+        enabled: route.enabled !== false,
+        provider: route.provider,
+        model: route.model,
+        reasoningEffort: route.reasoningEffort || undefined,
+        timeoutMs: route.timeoutMs,
+      }
     }
 
     function modelOptions(groups, provider, currentModel) {
@@ -85,22 +124,34 @@ window.__ModuleLoader__.load({
     }
 
     function RouteCard(props) {
-      const { title, description, route, groups, onChange } = props
+      const { title, description, route, groups, onChange, disabledNote } = props
       const providers = providerOptions(groups, route.provider)
       const models = modelOptions(groups, route.provider, route.model)
       const efforts = effortOptions(groups, route)
       const providerName = (providers.find((option) => option.value === route.provider) || {}).label || route.provider
       const modelName = (models.find((option) => option.value === route.model) || {}).label || route.model
-      return h('section', { className: 'rbm-card' },
+      const off = route.enabled === false
+      return h('section', { className: 'rbm-card' + (off ? ' rbm-card-off' : '') },
         h('div', { className: 'rbm-card-head' },
-          h('div', { className: 'rbm-card-title' }, title),
-          h('div', { className: 'rbm-card-desc' }, description)),
+          h('div', { className: 'rbm-card-title-row' },
+            h('div', { className: 'rbm-card-title' }, title),
+            h('label', { className: 'rbm-switch' },
+              h('input', {
+                type: 'checkbox',
+                checked: !off,
+                onChange: (event) => onChange('enabled', event.target.checked),
+              }),
+              h('span', { className: 'rbm-switch-track' }, h('span', { className: 'rbm-switch-thumb' })),
+              h('span', { className: 'rbm-switch-label' }, off ? '已停用' : '已启用'))),
+          h('div', { className: 'rbm-card-desc' }, description),
+          off ? h('div', { className: 'rbm-card-note' }, disabledNote) : null),
         h('div', { className: 'rbm-row' },
           h('label', { className: 'rbm-label', htmlFor: `rbm-provider-${title}` }, 'Provider'),
           h('select', {
             id: `rbm-provider-${title}`,
             className: 'rbm-select',
             value: route.provider,
+            disabled: off,
             onChange: (event) => onChange('provider', event.target.value),
           }, providers.length > 0 ? providers.map((option) => h('option', { key: option.value, value: option.value }, option.label)) : h('option', { value: '' }, '（无可用 provider）'))),
         h('div', { className: 'rbm-row' },
@@ -109,6 +160,7 @@ window.__ModuleLoader__.load({
             id: `rbm-model-${title}`,
             className: 'rbm-select',
             value: route.model,
+            disabled: off,
             onChange: (event) => onChange('model', event.target.value),
           }, models.length > 0 ? models.map((option) => h('option', { key: option.value, value: option.value }, option.label)) : h('option', { value: '' }, '（该 provider 无可用模型）'))),
         h('div', { className: 'rbm-row' },
@@ -117,9 +169,25 @@ window.__ModuleLoader__.load({
             id: `rbm-effort-${title}`,
             className: 'rbm-select',
             value: route.reasoningEffort || '',
+            disabled: off,
             onChange: (event) => onChange('reasoningEffort', event.target.value),
           }, efforts.map((option) => h('option', { key: option.value || 'default', value: option.value }, option.label)))),
-        h('div', { className: 'rbm-current' }, '当前：', h('code', null, providerName + ' / ' + modelName + (route.reasoningEffort ? ' / ' + route.reasoningEffort : ''))))
+        h('div', { className: 'rbm-row' },
+          h('label', { className: 'rbm-label', htmlFor: `rbm-timeout-${title}` }, '超时'),
+          h('div', { className: 'rbm-timeout' },
+            h('input', {
+              id: `rbm-timeout-${title}`,
+              className: 'rbm-input',
+              type: 'number',
+              min: 10,
+              max: 1800,
+              step: 10,
+              value: toSeconds(route.timeoutMs),
+              disabled: off,
+              onChange: (event) => onChange('timeoutMs', fromSeconds(event.target.value)),
+            }),
+            h('span', { className: 'rbm-unit' }, '秒'))),
+        h('div', { className: 'rbm-current' }, '当前：', h('code', null, providerName + ' / ' + modelName + (route.reasoningEffort ? ' / ' + route.reasoningEffort : '') + ' / ' + toSeconds(route.timeoutMs) + 's')))
     }
 
     function CrossReviewSettingsPage() {
@@ -178,8 +246,8 @@ window.__ModuleLoader__.load({
         setStatus(null)
         try {
           const payload = {
-            reviewer: { ...draft.reviewer, reasoningEffort: draft.reviewer.reasoningEffort || undefined },
-            arbiter: { ...draft.arbiter, reasoningEffort: draft.arbiter.reasoningEffort || undefined },
+            reviewer: toRoutePayload(draft.reviewer),
+            arbiter: toRoutePayload(draft.arbiter),
           }
           const response = await fetch('/api/cross-review-config', {
             method: 'PUT',
@@ -191,7 +259,7 @@ window.__ModuleLoader__.load({
           if (!response.ok || !body.ok) throw new Error(body.error || 'HTTP ' + response.status)
           setData((previous) => ({ ...previous, config: body.config, persistent: body.persistent }))
           setDraft(cloneDraft(body.config))
-          setStatus({ kind: 'ok', text: body.persistent ? '已保存，立即用于后续 cross_review / cross_review_arbitrate 调用。' : '已保存到当前进程（存储不可用，重启后会恢复默认值）。' })
+          setStatus({ kind: 'ok', text: body.persistent ? '已保存，立即用于后续调用。' : '已保存到当前进程（存储不可用，重启后会恢复默认值）。' })
         } catch (saveError) {
           setStatus({ kind: 'error', text: '保存失败：' + (saveError instanceof Error ? saveError.message : String(saveError)) })
         } finally {
@@ -208,21 +276,23 @@ window.__ModuleLoader__.load({
         h('style', null, CSS),
         h('div', { className: 'rbm-header' },
           h('h1', { className: 'rbm-title' }, '交叉复核模式'),
-          h('p', { className: 'rbm-sub' }, '配置「复核者」与「裁决者」使用的模型。选项来自当前 DSH 已配置且注册的 LLM providers，保存后立即作用于本模式的后续审查与裁决。')),
+          h('p', { className: 'rbm-sub' }, '配置复核者与裁决者的启用状态、模型和超时时长。模型选项来自当前 DSH 已配置且注册的 LLM providers，保存后立即作用于后续调用。')),
         loading ? h('div', { className: 'rbm-empty' }, '正在读取当前可用模型…') : null,
         error ? h('div', { className: 'rbm-status rbm-status-error' }, '读取失败：' + error) : null,
         !loading && error ? h('div', { className: 'rbm-footer' }, h('button', { className: 'rbm-btn', onClick: load }, '重试')) : null,
         !loading && !error && draft !== null ? h(React.Fragment, null,
           h(RouteCard, {
-            title: '复核模型（cross_review）',
-            description: '独立复核子代理使用的模型；默认 Hy4 · WorkBuddy，可改为当前 DSH 中任意可用模型。',
+            title: '复核者（cross_review）',
+            description: '过程监督 + 引导：给方向、盯风险，只在会导致返工或损坏时拦截。默认 Hy4 · WorkBuddy。',
+            disabledNote: '复核者已停用：cross_review 将直接放行，不再启动子代理。',
             route: draft.reviewer,
             groups,
             onChange: (field, value) => onChange('reviewer', field, value),
           }),
           h(RouteCard, {
-            title: '裁决模型（cross_review_arbitrate）',
-            description: '主代理与复核者无法达成共识时，由该模型做最终裁决；默认 GPT-6.1 Sol · PackyCode1。',
+            title: '裁决者（brief / final / arbitrate）',
+            description: '开工前解析需求、收尾时审核交付、争议时裁决。默认 GPT-6.1 Sol · PackyCode1。',
+            disabledNote: '裁决者已停用：需求解析、交付审核与争议裁决将直接放行，不再启动子代理。',
             route: draft.arbiter,
             groups,
             onChange: (field, value) => onChange('arbiter', field, value),
@@ -233,7 +303,7 @@ window.__ModuleLoader__.load({
             h('button', { className: 'rbm-btn', disabled: saving, onClick: load }, '刷新模型列表'),
             h('span', { className: 'rbm-note' }, modelSummary + (data && data.persistent === false ? ' · 存储不可用' : '')),
             status !== null ? h('span', { className: 'rbm-status ' + (status.kind === 'ok' ? 'rbm-status-ok' : 'rbm-status-error') }, status.text) : null)) : null,
-        h('div', { className: 'rbm-note' }, '提示：修改只影响新产生的审查/裁决调用，不会改写已经记录的历史工具结果。'))
+        h('div', { className: 'rbm-note' }, '提示：停用某个角色后，对应工具会直接放行而不启动子代理；超时按秒配置，范围 10–1800 秒。修改只影响新产生的调用，不改写已记录的历史工具结果。'))
     }
 
     return {

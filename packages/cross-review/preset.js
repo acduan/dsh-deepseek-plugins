@@ -72,11 +72,23 @@ function routeOf(value, fallback) {
       ? candidate.reasoningEffort.trim()
       : undefined
     : fallback.reasoningEffort
+  // Route-level policy from the settings page: a disabled role short-circuits
+  // its tool, and the timeout overrides the deployment default per role.
+  const enabled = typeof candidate.enabled === 'boolean' ? candidate.enabled : fallback.enabled !== false
+  const timeoutMs =
+    Number.isFinite(candidate.timeoutMs) && candidate.timeoutMs > 0 ? candidate.timeoutMs : fallback.timeoutMs
   return {
+    enabled,
     provider,
     model,
     ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeoutMs } : {}),
   }
+}
+
+function routeTimeout(route, fallbackMs) {
+  if (Number.isFinite(route?.timeoutMs) && route.timeoutMs > 0) return route.timeoutMs
+  return Number.isFinite(fallbackMs) && fallbackMs > 0 ? fallbackMs : 180000
 }
 
 function routeLabel(route) {
@@ -626,9 +638,45 @@ function makeReviewTool(ctx, config, getRoutes) {
       const modelLabel = routeLabel(routes.reviewer)
       const sessionId = exec.agent?.session?.id
       if (typeof sessionId === 'string' && sessionId.length > 0) forgetReview(sessionId)
+
+      // A disabled reviewer must not spawn a child, and must not become a silent
+      // gate either: it authorizes the guarded call and says so explicitly.
+      if (routes.reviewer.enabled === false) {
+        if (
+          config.enforceGuard !== false &&
+          typeof sessionId === 'string' &&
+          sessionId.length > 0
+        ) {
+          rememberReview(sessionId, args, config.reviewUses)
+        }
+        return {
+          verdict: 'consensus',
+          summary: '复核者已在设置中停用，本次直接放行（未启动子代理）。',
+          guidance: [],
+          focus_next: [],
+          watchpoints: [],
+          objections: [],
+          omissions: [],
+          risks: [],
+          alternatives: [],
+          required_fixes: [],
+          evidence: [],
+          reviewer_model: '',
+          raw: '',
+        }
+      }
+
       try {
         const prompt = buildReviewPrompt(args)
-        const { result } = await runChild(ctx, exec, 'cross-review-internal', routes.reviewer, prompt, '交叉复核', config.reviewTimeoutMs)
+        const { result } = await runChild(
+          ctx,
+          exec,
+          'cross-review-internal',
+          routes.reviewer,
+          prompt,
+          '交叉复核',
+          routeTimeout(routes.reviewer, config.reviewTimeoutMs),
+        )
         const rawText = extractText(result)
         if (result?.stopReason !== undefined && result.stopReason !== 'completed') {
           const diagnostic = typeof result.diagnostic === 'string' ? `：${result.diagnostic}` : ''
@@ -713,9 +761,27 @@ function makeArbitrateTool(ctx, config, getRoutes) {
     async execute(args, exec) {
       const routes = getRoutes()
       const modelLabel = routeLabel(routes.arbiter)
+      if (routes.arbiter.enabled === false) {
+        return {
+          ruling: 'uphold_main',
+          decision: '裁决者已在设置中停用，按主代理方案继续（未启动子代理）。',
+          reasoning: '',
+          required_actions: [],
+          arbiter_model: '',
+          raw: '',
+        }
+      }
       try {
         const prompt = buildArbitrationPrompt(args)
-        const { result } = await runChild(ctx, exec, 'cross-review-internal', routes.arbiter, prompt, '交叉复核裁决', config.reviewTimeoutMs)
+        const { result } = await runChild(
+          ctx,
+          exec,
+          'cross-review-internal',
+          routes.arbiter,
+          prompt,
+          '交叉复核裁决',
+          routeTimeout(routes.arbiter, config.reviewTimeoutMs),
+        )
         const rawText = extractText(result)
         if (result?.stopReason !== undefined && result.stopReason !== 'completed') {
           const diagnostic = typeof result.diagnostic === 'string' ? `：${result.diagnostic}` : ''
@@ -889,6 +955,20 @@ function makeBriefTool(ctx, config, getRoutes) {
     async execute(args, exec) {
       const routes = getRoutes()
       const modelLabel = routeLabel(routes.arbiter)
+      if (routes.arbiter.enabled === false) {
+        return {
+          goal: '裁决者已在设置中停用，跳过需求解析（未启动子代理）。',
+          in_scope: [],
+          out_of_scope: [],
+          acceptance_criteria: [],
+          assumptions: [],
+          open_questions: [],
+          risks: [],
+          suggested_steps: [],
+          arbiter_model: '',
+          raw: '',
+        }
+      }
       try {
         const prompt = buildBriefPrompt(args)
         const { result } = await runChild(
@@ -898,7 +978,7 @@ function makeBriefTool(ctx, config, getRoutes) {
           routes.arbiter,
           prompt,
           '需求解析',
-          config.reviewTimeoutMs,
+          routeTimeout(routes.arbiter, config.reviewTimeoutMs),
         )
         const rawText = extractText(result)
         if (result?.stopReason !== undefined && result.stopReason !== 'completed') {
@@ -975,6 +1055,18 @@ function makeFinalAuditTool(ctx, config, getRoutes) {
     async execute(args, exec) {
       const routes = getRoutes()
       const modelLabel = routeLabel(routes.arbiter)
+      if (routes.arbiter.enabled === false) {
+        return {
+          ruling: 'ready',
+          summary: '裁决者已在设置中停用，跳过交付审核（未启动子代理）。',
+          criteria: [],
+          blocking_issues: [],
+          required_actions: [],
+          reasoning: '',
+          arbiter_model: '',
+          raw: '',
+        }
+      }
       try {
         const prompt = buildFinalAuditPrompt(args)
         const { result } = await runChild(
@@ -984,7 +1076,7 @@ function makeFinalAuditTool(ctx, config, getRoutes) {
           routes.arbiter,
           prompt,
           '交付审核',
-          config.reviewTimeoutMs,
+          routeTimeout(routes.arbiter, config.reviewTimeoutMs),
         )
         const rawText = extractText(result)
         if (result?.stopReason !== undefined && result.stopReason !== 'completed') {
@@ -1002,6 +1094,15 @@ function makeFinalAuditTool(ctx, config, getRoutes) {
 }
 
 function buildProtocol(routes) {
+  const reviewerOff = routes.reviewer.enabled === false
+  const arbiterOff = routes.arbiter.enabled === false
+  const statusLines = [
+    reviewerOff ? '- 复核者：**当前已在设置中停用**，`cross_review` 会直接放行且不启动子代理。' : null,
+    arbiterOff
+      ? '- 裁决者：**当前已在设置中停用**，`cross_review_brief` / `cross_review_final` / `cross_review_arbitrate` 会直接放行。'
+      : null,
+  ].filter((line) => line !== null)
+
   return `## 交叉复核模式协议（Cross-Verification Mode）
 
 本模式有三个角色，分工固定：**裁决者做需求解析与交付审核，主代理干活，复核者做过程监督与引导。**
@@ -1010,7 +1111,7 @@ function buildProtocol(routes) {
 - **裁决者**（${routeLabel(routes.arbiter)}）：任务开始时解析需求，任务结束时审核交付。只在首尾各调用一次。
 - **主代理**（你）：按解析出的规格执行，过程中保持自检。
 - **复核者**（${routeLabel(routes.reviewer)}）：过程中给方向、盯风险，不替你做决定。
-
+${statusLines.length > 0 ? `\n### 当前生效状态\n${statusLines.join('\n')}\n` : ''}
 ### 任务开始时：调用 \`cross_review_brief\`（一次）
 把用户原始需求交给裁决者，得到 goal / 范围 / 验收标准 / 假设 / 待确认问题。
 若 open_questions 里有必须用户决定的事项，先用 ask_user_question 问清楚再开工；其余按 assumptions 推进并在最终回复里说明。

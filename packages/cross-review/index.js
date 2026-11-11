@@ -21,16 +21,25 @@ export const inject = ['connection']
 
 export const DEFAULT_CONFIG = Object.freeze({
   reviewer: Object.freeze({
+    enabled: true,
     provider: 'magpie',
     model: 'workbuddy/hy4free',
     reasoningEffort: 'high',
+    timeoutMs: 180000,
   }),
   arbiter: Object.freeze({
+    enabled: true,
     provider: 'magpie-responses',
     model: 'packycode1/gpt-6.1-sol',
     reasoningEffort: 'high',
+    timeoutMs: 180000,
   }),
 })
+
+// Timeout bounds shared with the settings page: a child that cannot answer in
+// ten minutes will not answer, and a sub-second budget would kill every call.
+export const TIMEOUT_MIN_MS = 10000
+export const TIMEOUT_MAX_MS = 1800000
 
 const DOMAIN_SPEC = {
   name: 'cross_review_config',
@@ -73,11 +82,23 @@ function normalizeRoute(route, fallback) {
       ? candidate.reasoningEffort.trim()
       : undefined
     : fallback.reasoningEffort
+  // `enabled` and `timeoutMs` are route-level policy, not model identity, so an
+  // explicit value always wins and omission inherits the deployment default.
+  const enabled = typeof candidate.enabled === 'boolean' ? candidate.enabled : fallback.enabled
+  const timeoutMs = normalizeTimeout(candidate.timeoutMs, fallback.timeoutMs)
   return {
+    enabled,
     provider,
     model,
+    timeoutMs,
     ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
   }
+}
+
+function normalizeTimeout(value, fallback) {
+  const candidate = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(candidate) || candidate <= 0) return fallback
+  return Math.min(TIMEOUT_MAX_MS, Math.max(TIMEOUT_MIN_MS, Math.round(candidate)))
 }
 
 export function normalizeConfig(value) {

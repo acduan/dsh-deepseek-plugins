@@ -82,10 +82,29 @@
 
 ## 模型配置
 
-打开 **Settings → 交叉复核模式**，页面从当前 DSH 已配置且注册的 LLM providers 动态读取模型列表：
+打开 **Settings → 交叉复核模式**，每个角色一张卡片，可配置：
 
-- **复核模型（`cross_review` / `cross_review_brief` 之外）**：默认 Hy4 · WorkBuddy
-- **裁决模型（`cross_review_brief` / `cross_review_final` / `cross_review_arbitrate`）**：默认 GPT-6.1 Sol · PackyCode1
+| 项 | 说明 |
+|---|---|
+| **启用开关** | 停用后对应工具直接放行，**不启动子代理**，节省 token 与时间 |
+| **Provider / 模型 / 推理强度** | 从当前 DSH 已配置且注册的 LLM providers 动态读取 |
+| **超时时长** | 按秒配置，范围 10–1800 秒，默认 180 秒；每个角色独立 |
+
+默认值：
+
+- **复核者**：Hy4 · WorkBuddy，180 秒
+- **裁决者**：GPT-6.1 Sol · PackyCode1，180 秒
+
+停用某个角色后的行为：
+
+| 停用角色 | 受影响工具 | 行为 |
+|---|---|---|
+| 复核者 | `cross_review` | 返回 `consensus` 并说明"已停用"，执行守卫照常授权 |
+| 裁决者 | `cross_review_brief` | 返回空规格并说明"已停用"，主代理按自身理解执行 |
+| 裁决者 | `cross_review_final` | 返回 `ready` 并说明"已停用"，不再审核 |
+| 裁决者 | `cross_review_arbitrate` | 返回 `uphold_main` 并说明"已停用" |
+
+协议提示词会同步显示当前停用状态，主代理不会误以为该角色仍在工作。
 
 配置通过 `/api/cross-review-config` 读写并持久化在 `cross_review_config` storage domain 中。
 
@@ -99,16 +118,20 @@
     reviewUses: 8
     reviewTimeoutMs: 180000
     reviewer:
+      enabled: true
       provider: magpie
       model: workbuddy/hy4free
       reasoningEffort: high
+      timeoutMs: 180000
     arbiter:
+      enabled: true
       provider: magpie-responses
       model: packycode1/gpt-6.1-sol
       reasoningEffort: high
+      timeoutMs: 180000
 ```
 
-配置文件值只作为 `crossReviewConfig` 服务不可用时的 fallback。
+配置文件值只作为 `crossReviewConfig` 服务不可用时的 fallback；正常桌面 profile 下，设置页保存的值优先。
 
 ## 设计取舍
 
