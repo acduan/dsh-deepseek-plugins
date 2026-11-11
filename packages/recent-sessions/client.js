@@ -636,7 +636,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots', 'locale'],
+      inject: ['slots', 'locale', 'contextMenus', 'sessions', 'workspaces'],
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'recent-sessions: dictionaries');
 
@@ -648,7 +648,7 @@ window.__ModuleLoader__.load({
         const contextMenus = ctx.get('contextMenus');
         const openMenu = (sessionId, displayTitle, point) => {
           if (contextMenus != null && typeof contextMenus.open === 'function') {
-            contextMenus.open({ kind: 'recent-session', value: { sessionId, displayTitle } }, point);
+            contextMenus.open({ kind: 'session', value: { sessionId, displayTitle } }, point);
           }
         };
 
@@ -673,7 +673,7 @@ window.__ModuleLoader__.load({
           });
           ctx.effect(() => contextMenus.register({
             id: 'recent-sessions.menu',
-            target: 'recent-session',
+            target: 'session',
             order: 100,
             observe: () => {
               const sources = [];
@@ -682,72 +682,24 @@ window.__ModuleLoader__.load({
               return sources;
             },
             resolve: async ({ sessionId }) => {
-              const summary = sessionsService && sessionsService.list ? sessionsService.list.getSnapshot().byId[sessionId] : undefined;
-              const cwd = summary && typeof summary.cwd === 'string' ? summary.cwd : '';
+              // Native session menu already provides rename / copy ID / reveal / archive.
+              // This contribution only adds "new session" for the owning workspace.
               const items = workspacesService && workspacesService.list ? workspacesService.list.getSnapshot().items : undefined;
               const owning = Array.isArray(items)
                 ? items.find((workspace) => workspace && Array.isArray(workspace.sessionIds) && workspace.sessionIds.includes(sessionId))
                 : undefined;
               const workspaceId = owning && owning.workspaceId;
-              const actions = [];
-              if (workspaceId) {
-                actions.push({
-                  id: 'new-session',
-                  label: t('menu.newSession'),
-                  icon: { key: 'recent-sessions.new-session' },
-                  failureLabel: t('menu.newSessionError'),
-                  run: () => {
-                    const uiWorkspace = ctx.get('uiWorkspace');
-                    if (uiWorkspace != null && typeof uiWorkspace.startSession === 'function') uiWorkspace.startSession(workspaceId);
-                  },
-                });
-              }
-              actions.push({
-                id: 'rename-session',
-                label: t('menu.rename'),
-                icon: { key: 'recent-sessions.rename' },
-                run: () => {
-                  const currentTitle = summary && typeof summary.title === 'string' ? summary.title : '';
-                  renameStore.set({ sessionId, currentTitle });
-                },
-              });
-              actions.push({
-                id: 'copy-session-id',
-                label: t('menu.copySessionId'),
-                icon: { key: 'recent-sessions.copy' },
-                failureLabel: t('menu.copySessionIdError'),
-                run: async () => {
-                  const ok = await copyText(sessionId);
-                  if (!ok) throw new Error('copy failed');
-                  if (typeof contextMenus.notify === 'function') contextMenus.notify(t('menu.sessionIdCopied'), true);
-                },
-              });
-              if (cwd) {
-                const apps = await loadApps();
-                const manager = apps.find((id) => FILE_MANAGERS.includes(id));
-                if (manager) {
-                  actions.push({
-                    id: 'reveal',
-                    label: t('menu.openFolder'),
-                    icon: { key: 'recent-sessions.folder' },
-                    failureLabel: t('menu.openFolderError'),
-                    run: () => launchApp(manager, cwd),
-                  });
-                }
-              }
-              actions.push({
-                id: 'archive-session',
-                label: t('menu.archive'),
-                icon: { key: 'recent-sessions.archive' },
-                failureLabel: t('menu.archiveError'),
-                separatorBefore: true,
+              if (!workspaceId) return [];
+              return [{
+                id: 'new-session',
+                label: t('menu.newSession'),
+                icon: { key: 'recent-sessions.new-session' },
+                failureLabel: t('menu.newSessionError'),
                 run: () => {
                   const uiWorkspace = ctx.get('uiWorkspace');
-                  if (uiWorkspace != null && typeof uiWorkspace.archiveSession === 'function') return uiWorkspace.archiveSession(sessionId);
-                  return undefined;
+                  if (uiWorkspace != null && typeof uiWorkspace.startSession === 'function') uiWorkspace.startSession(workspaceId);
                 },
-              });
-              return actions;
+              }];
             },
           }), 'recent-sessions: context menu');
         }
