@@ -1,26 +1,26 @@
-// @local/dsh-rebuttal-mode/config
-// Host-side model configuration store for Rebuttal Mode.
+// @local/dsh-cross-review/config
+// Host-side model configuration store for Cross-Verification Mode.
 //
 // This row is mounted once at profile level (outside any Agent preset). It:
-//   - persists the chosen critic/arbiter routes in a storage domain;
-//   - exposes the current values as the `rebuttalConfig` service for the
+//   - persists the chosen reviewer/arbiter routes in a storage domain;
+//   - exposes the current values as the `crossReviewConfig` service for the
 //     preset-scoped tool plugin;
 //   - serves the authenticated browser settings page through
-//     /api/rebuttal-config with the model catalog of currently configured DSH
+//     /api/cross-review-config with the model catalog of currently configured DSH
 //     LLM providers.
 //
 // It intentionally imports nothing from the DSH installation: all seams are
 // reached through ctx.get() and the documented connection.fetch/storageDomain
 // contracts, so a DSH update cannot break this local bundle by moving a symbol.
 
-export const name = 'rebuttal-config'
-// Wait for the Web carrier so /api/rebuttal-config is registered in desktop /
+export const name = 'cross-review-config'
+// Wait for the Web carrier so /api/cross-review-config is registered in desktop /
 // web profiles. The preset-scoped tool plugin only consumes the service; it
 // still falls back to its static config if this row is unavailable.
 export const inject = ['connection']
 
 export const DEFAULT_CONFIG = Object.freeze({
-  critic: Object.freeze({
+  reviewer: Object.freeze({
     provider: 'magpie',
     model: 'workbuddy/hy4free',
     reasoningEffort: 'high',
@@ -33,7 +33,7 @@ export const DEFAULT_CONFIG = Object.freeze({
 })
 
 const DOMAIN_SPEC = {
-  name: 'rebuttal_mode_config',
+  name: 'cross_review_config',
   version: 1,
   invalidRecords: 'backup-and-skip',
   tables: {
@@ -82,10 +82,10 @@ function normalizeRoute(route, fallback) {
 
 export function normalizeConfig(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('反驳式模式配置必须是对象')
+    throw new Error('交叉复核模式配置必须是对象')
   }
   return {
-    critic: normalizeRoute(value.critic, DEFAULT_CONFIG.critic),
+    reviewer: normalizeRoute(value.reviewer, DEFAULT_CONFIG.reviewer),
     arbiter: normalizeRoute(value.arbiter, DEFAULT_CONFIG.arbiter),
   }
 }
@@ -148,7 +148,7 @@ export async function buildCatalog(ctx) {
 }
 
 async function validateRoute(ctx, route, label) {
-  const normalized = normalizeRoute(route, DEFAULT_CONFIG[label === 'critic' ? 'critic' : 'arbiter'])
+  const normalized = normalizeRoute(route, DEFAULT_CONFIG[label === 'reviewer' ? 'reviewer' : 'arbiter'])
   const llm = ctx.get('llm')
   if (llm === undefined) throw new Error('LLM 服务不可用，无法校验模型')
   const providers = llm.listProviders()
@@ -184,13 +184,13 @@ export async function apply(ctx, config = {}) {
       if (stored !== undefined) currentConfig = normalizeConfig(stored)
       closeDomain = () => domain.close()
     } catch (error) {
-      ctx.logger?.warn?.(`rebuttal-config: storage unavailable, using in-memory config: ${errorMessage(error)}`)
+      ctx.logger?.warn?.(`cross-review-config: storage unavailable, using in-memory config: ${errorMessage(error)}`)
       table = undefined
       closeDomain = undefined
     }
   }
 
-  ctx.provide('rebuttalConfig', {
+  ctx.provide('crossReviewConfig', {
     get: () => cloneConfig(currentConfig),
     defaults: () => cloneConfig(DEFAULT_CONFIG),
   })
@@ -202,7 +202,7 @@ export async function apply(ctx, config = {}) {
       throw new Error('connection.fetch is unavailable')
     }
     offRoute = connection.fetch.register({
-      path: '/api/rebuttal-config',
+      path: '/api/cross-review-config',
       methods: ['GET', 'PUT'],
       requestBody: 'buffered',
       fetch: async (request) => {
@@ -227,7 +227,7 @@ export async function apply(ctx, config = {}) {
         }
         try {
           const next = {
-            critic: await validateRoute(ctx, body.critic ?? currentConfig.critic, 'critic'),
+            reviewer: await validateRoute(ctx, body.reviewer ?? currentConfig.reviewer, 'reviewer'),
             arbiter: await validateRoute(ctx, body.arbiter ?? currentConfig.arbiter, 'arbiter'),
           }
           if (table !== undefined) await table.put('config', next)
@@ -243,12 +243,12 @@ export async function apply(ctx, config = {}) {
       },
     })
   } catch (error) {
-    ctx.logger?.warn?.(`rebuttal-config: fetch route unavailable: ${errorMessage(error)}`)
+    ctx.logger?.warn?.(`cross-review-config: fetch route unavailable: ${errorMessage(error)}`)
     offRoute = undefined
   }
 
   ctx.logger?.info?.(
-    `rebuttal-config: active — critic=${currentConfig.critic.provider}/${currentConfig.critic.model}, ` +
+    `cross-review-config: active — reviewer=${currentConfig.reviewer.provider}/${currentConfig.reviewer.model}, ` +
       `arbiter=${currentConfig.arbiter.provider}/${currentConfig.arbiter.model}, ` +
       (table === undefined ? 'in-memory only' : 'persisted'),
   )
@@ -264,5 +264,5 @@ export async function apply(ctx, config = {}) {
     } catch {
       // The domain may already be closed.
     }
-  }, 'rebuttal-config: cleanup')
+  }, 'cross-review-config: cleanup')
 }

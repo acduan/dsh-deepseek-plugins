@@ -2,7 +2,7 @@
   "name": "dsh-deepseek-plugins",
   "version": "0.1.0",
   "private": true,
-  "description": "DSH (DeepSeek Harness) custom bundle plugins: recent-sessions, token-daily-stats, and Rebuttal Mode.",
+  "description": "DSH (DeepSeek Harness) custom bundle plugins: recent-sessions, token-daily-stats, and Cross-Verification Mode.",
   "license": "MIT",
   "workspaces": [
     "packages/*"

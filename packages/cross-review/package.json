@@ -1,31 +1,28 @@
 {
-  "name": "@local/dsh-rebuttal-settings-ui",
+  "name": "@local/dsh-cross-review",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Settings page for Rebuttal Mode: choose the critic and arbiter models from the current DSH model catalog.",
+  "description": "Cross-Verification Mode: adversarial shadow review for every material step, with Hy4.WorkBuddy reviewer and GPT-6.1 Sol arbitration.",
   "license": "MIT",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
-    "./client": "./client.js",
+    "./config": "./config.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
   "files": [
     "index.js",
-    "client.js",
+    "config.js",
     "cordis.patch.yml",
     "locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "README.md"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web",
-      "immediately": true
     }
   }
 }

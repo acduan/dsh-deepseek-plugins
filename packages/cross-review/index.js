@@ -1,10 +1,10 @@
-// @local/dsh-rebuttal-mode
-// Host plugin for the "Rebuttal Mode" (反驳式模式) agent preset.
+// @local/dsh-cross-review
+// Host plugin for the "Cross-Verification Mode" (交叉复核模式) agent preset.
 //
 // It registers two model-facing tools on every Agent using this preset:
-//   - rebuttal_review: spawns an independent critic child on a different model
+//   - cross_review: spawns an independent reviewer child on a different model
 //     (default Hy4.WorkBuddy via `magpie`) and waits for its verdict.
-//   - rebuttal_arbitrate: when review and main disagree, spawns an arbiter
+//   - cross_review_arbitrate: when review and main disagree, spawns an arbiter
 //     child on GPT-6.1 Sol (via `magpie-responses`) and returns a binding ruling.
 //
 // It also installs a small tool guard so write/edit/shell/ask-user/present/
@@ -17,10 +17,10 @@
 // would make the bundle fragile across app updates. The registry accepts this
 // plain tool-definition shape.
 
-export const name = 'rebuttal-mode'
+export const name = 'cross-review'
 export const inject = ['tools', 'subagents', 'systemPrompt']
 
-const DEFAULT_CRITIC = {
+const DEFAULT_REVIEWER = {
   provider: 'magpie',
   model: 'workbuddy/hy4free',
   reasoningEffort: 'high',
@@ -160,10 +160,10 @@ function normalizeReview(parsed, rawText, modelLabel) {
     (typeof record.reasoning === 'string' && record.reasoning.trim()) ||
     (typeof record.comment === 'string' && record.comment.trim()) ||
     (verdict === 'unstructured'
-      ? `反驳者返回了非结构化结论，按未达成共识处理。原文：${truncate(rawText, 1200)}`
+      ? `复核者返回了非结构化结论，按未达成共识处理。原文：${truncate(rawText, 1200)}`
       : verdict === 'consensus'
-        ? '反驳者未发现实质性反对意见。'
-        : '反驳者提出了反对意见。')
+        ? '复核者未发现实质性反对意见。'
+        : '复核者提出了反对意见。')
 
   // A "consensus" verdict cannot carry blocking objections: fail closed.
   const blocking = objections.length + omissions.length + risks.length + requiredFixes.length
@@ -178,7 +178,7 @@ function normalizeReview(parsed, rawText, modelLabel) {
     alternatives,
     required_fixes: requiredFixes,
     evidence,
-    critic_model: modelLabel,
+    reviewer_model: modelLabel,
     raw: truncate(rawText, 12000),
   }
 }
@@ -187,7 +187,7 @@ function normalizeArbitration(parsed, rawText, modelLabel) {
   const record = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
   let ruling = typeof record.ruling === 'string' ? record.ruling.toLowerCase() : ''
   if (['uphold_main', 'main', 'allow', 'approve', 'approved'].includes(ruling)) ruling = 'uphold_main'
-  else if (['uphold_critic', 'critic', 'block', 'reject', 'rejected'].includes(ruling)) ruling = 'uphold_critic'
+  else if (['uphold_reviewer', 'reviewer', 'block', 'reject', 'rejected'].includes(ruling)) ruling = 'uphold_reviewer'
   else if (['modified', 'modify', 'revise', 'revised'].includes(ruling)) ruling = 'modified'
   else if (['need_more_evidence', 'insufficient', 'more_evidence'].includes(ruling)) ruling = 'need_more_evidence'
   else ruling = 'unstructured'
@@ -224,7 +224,7 @@ function errorReview(message, modelLabel) {
     alternatives: [],
     required_fixes: [],
     evidence: [],
-    critic_model: modelLabel,
+    reviewer_model: modelLabel,
     raw: '',
   }
 }
@@ -309,7 +309,7 @@ function checklistFor(category, role) {
 function buildReviewPrompt(args) {
   const category = typeof args.category === 'string' ? args.category : 'other'
   const options = Array.isArray(args.options) ? args.options.filter((item) => typeof item === 'string') : []
-  return `你是「反驳者」（adversarial reviewer）。你不是主代理的助手，你的职责是主动寻找主代理决策中的幻觉、遗漏、绕路、错误、过度自信和“未验证就打勾”。
+  return `你是「复核者」（adversarial reviewer）。你不是主代理的助手，你的职责是主动寻找主代理决策中的幻觉、遗漏、绕路、错误、过度自信和“未验证就打勾”。
 
 主代理即将执行或已经形成的步骤（只以这段材料为准，你无法看到主代理的对话）：
 ---BEGIN SUBJECT---
@@ -332,7 +332,7 @@ ${args.evidence ? `\n主代理声称已经完成的验证：\n${args.evidence}` 
 }
 
 function buildArbitrationPrompt(args) {
-  return `你是「裁决者」（arbiter）。主代理与反驳者无法达成共识，现在由你做最终裁决。你必须独立验证，而不是简单支持任何一方。
+  return `你是「裁决者」（arbiter）。主代理与复核者无法达成共识，现在由你做最终裁决。你必须独立验证，而不是简单支持任何一方。
 
 步骤/决策：
 ---BEGIN SUBJECT---
@@ -342,26 +342,26 @@ ${args.subject}
 主代理立场：
 ${args.main_position}
 
-反驳者立场：
-${args.critic_position}
+复核者立场：
+${args.reviewer_position}
 
 ${args.context ? `补充上下文：\n${args.context}\n` : ''}
 ${args.evidence ? `已有证据：\n${args.evidence}\n` : ''}
 裁决规则：
 1. 用你被授予的工具独立核查关键事实（网页、文件、只读命令/测试）；不要修改任何文件。
-2. 判断主代理是否可以按原方案继续，还是必须采纳反驳者意见/修改方案，还是证据不足需要补充。
+2. 判断主代理是否可以按原方案继续，还是必须采纳复核者意见/修改方案，还是证据不足需要补充。
 3. 你的裁决是最终结果，主代理必须执行 required_actions。
 4. 最后只输出一个 JSON 对象，不要输出 Markdown 代码围栏，不要输出 JSON 之外的文字：
-{"ruling":"uphold_main|uphold_critic|modified|need_more_evidence","decision":"最终决定","reasoning":"裁决理由","required_actions":["主代理必须执行的动作"]}`
+{"ruling":"uphold_main|uphold_reviewer|modified|need_more_evidence","decision":"最终决定","reasoning":"裁决理由","required_actions":["主代理必须执行的动作"]}`
 }
 
 async function runChild(ctx, exec, preset, route, prompt, label) {
   const subagents = ctx.get('subagents')
   if (subagents === undefined || typeof subagents.startActivation !== 'function') {
-    throw new Error('反驳式模式需要 subagents 服务，但当前组合没有挂载该服务')
+    throw new Error('交叉复核模式需要 subagents 服务，但当前组合没有挂载该服务')
   }
   if (exec.agent === undefined) {
-    throw new Error('反驳式模式工具必须由 Agent 调用（exec.agent 缺失）')
+    throw new Error('交叉复核模式工具必须由 Agent 调用（exec.agent 缺失）')
   }
   const activation = await subagents.startActivation({
     provider: 'spawn',
@@ -406,7 +406,7 @@ function forgetReview(sessionId) {
 
 function guardBlockMessage(toolName) {
   return (
-    `反驳式模式（Rebuttal Mode）拦截：调用 \`${toolName}\` 之前必须先完成一次针对该动作的 \`rebuttal_review\`。` +
+    `交叉复核模式（Cross-Verification Mode）拦截：调用 \`${toolName}\` 之前必须先完成一次针对该动作的 \`cross_review\`。` +
     `请把即将执行的完整内容放进 subject，并在 target_tools 中包含 "${toolName}"；只有 verdict 为 consensus 后才能重试该动作。`
   )
 }
@@ -424,7 +424,7 @@ function installGuard(ctx, config) {
       return guardBlockMessage(toolName)
     }
     if (record.targets !== null && !record.targets.has(toolName)) {
-      return `反驳式模式（Rebuttal Mode）拦截：最近的 rebuttal_review 没有授权 \`${toolName}\`。请针对该动作重新审查，并在 target_tools 中包含 "${toolName}"。`
+      return `交叉复核模式（Cross-Verification Mode）拦截：最近的 cross_review 没有授权 \`${toolName}\`。请针对该动作重新审查，并在 target_tools 中包含 "${toolName}"。`
     }
     reviews.delete(sessionId)
     return undefined
@@ -433,10 +433,10 @@ function installGuard(ctx, config) {
 
 function makeReviewTool(ctx, config, getRoutes) {
   return {
-    name: 'rebuttal_review',
+    name: 'cross_review',
     description:
-      '反驳式模式的核心工具：把当前步骤/决策/命令/交付物/用户问题交给一个独立的「反驳者」子代理审查。' +
-      '反驳者使用独立模型（默认 Hy4.WorkBuddy），可联网搜索、读取文件并运行只读验证；它看不到本会话，所以 subject 必须自包含。' +
+      '交叉复核模式的核心工具：把当前步骤/决策/命令/交付物/用户问题交给一个独立的「复核者」子代理审查。' +
+      '复核者使用独立模型（默认 Hy4.WorkBuddy），可联网搜索、读取文件并运行只读验证；它看不到本会话，所以 subject 必须自包含。' +
       '返回 verdict=consensus 才可继续；objection 时按 required_fixes 修改后复审；error/unstructured 视为未通过。' +
       '每个写操作、危险命令、用户提问和完成声明都必须先审核。',
     parameters: {
@@ -450,7 +450,7 @@ function makeReviewTool(ctx, config, getRoutes) {
         category: {
           type: 'string',
           enum: ['plan', 'command', 'requirements', 'frontend', 'backend', 'test', 'document', 'user_choice', 'final', 'other'],
-          description: '审查类别；决定反驳者使用的检查清单。',
+          description: '审查类别；决定复核者使用的检查清单。',
         },
         role: {
           type: 'string',
@@ -493,7 +493,7 @@ function makeReviewTool(ctx, config, getRoutes) {
           alternatives: { type: 'array', items: { type: 'string' } },
           required_fixes: { type: 'array', items: { type: 'string' } },
           evidence: { type: 'array', items: { type: 'string' } },
-          critic_model: { type: 'string' },
+          reviewer_model: { type: 'string' },
           raw: { type: 'string' },
         },
         required: [
@@ -505,7 +505,7 @@ function makeReviewTool(ctx, config, getRoutes) {
           'alternatives',
           'required_fixes',
           'evidence',
-          'critic_model',
+          'reviewer_model',
         ],
       },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
@@ -513,16 +513,16 @@ function makeReviewTool(ctx, config, getRoutes) {
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const routes = getRoutes()
-      const modelLabel = routeLabel(routes.critic)
+      const modelLabel = routeLabel(routes.reviewer)
       const sessionId = exec.agent?.session?.id
       if (typeof sessionId === 'string' && sessionId.length > 0) forgetReview(sessionId)
       try {
         const prompt = buildReviewPrompt(args)
-        const { result } = await runChild(ctx, exec, 'rebuttal-critic', routes.critic, prompt, '反驳审查')
+        const { result } = await runChild(ctx, exec, 'cross-review-reviewer', routes.reviewer, prompt, '交叉复核')
         const rawText = extractText(result)
         if (result?.stopReason !== undefined && result.stopReason !== 'completed') {
           const diagnostic = typeof result.diagnostic === 'string' ? `：${result.diagnostic}` : ''
-          return errorReview(`反驳子代理未正常完成（stopReason=${result.stopReason}）${diagnostic}`, modelLabel)
+          return errorReview(`复核子代理未正常完成（stopReason=${result.stopReason}）${diagnostic}`, modelLabel)
         }
         const parsed = parseJsonLoose(rawText)
         const normalized = normalizeReview(parsed, rawText, modelLabel)
@@ -537,7 +537,7 @@ function makeReviewTool(ctx, config, getRoutes) {
         return normalized
       } catch (error) {
         return errorReview(
-          `无法完成反驳审查：${error instanceof Error ? error.message : String(error)}`,
+          `无法完成交叉复核：${error instanceof Error ? error.message : String(error)}`,
           modelLabel,
         )
       }
@@ -547,10 +547,10 @@ function makeReviewTool(ctx, config, getRoutes) {
 
 function makeArbitrateTool(ctx, config, getRoutes) {
   return {
-    name: 'rebuttal_arbitrate',
+    name: 'cross_review_arbitrate',
     description:
-      '当主代理与反驳者无法达成共识时调用：把双方立场交给独立「裁决者」子代理，由默认 GPT-6.1 Sol 的模型做最终裁决。' +
-      '裁决结果具有约束力，主代理必须执行 required_actions。只有在前述 rebuttal_review 多轮仍为 objection、或涉及安全/不可逆/重大范围分歧时使用。',
+      '当主代理与复核者无法达成共识时调用：把双方立场交给独立「裁决者」子代理，由默认 GPT-6.1 Sol 的模型做最终裁决。' +
+      '裁决结果具有约束力，主代理必须执行 required_actions。只有在前述 cross_review 多轮仍为 objection、或涉及安全/不可逆/重大范围分歧时使用。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -563,9 +563,9 @@ function makeArbitrateTool(ctx, config, getRoutes) {
           type: 'string',
           description: '主代理的立场：主张、依据、已做验证、拟执行动作。',
         },
-        critic_position: {
+        reviewer_position: {
           type: 'string',
-          description: '反驳者的完整反对意见（可粘贴 rebuttal_review 的 JSON 摘要）。',
+          description: '复核者的完整反对意见（可粘贴 cross_review 的 JSON 摘要）。',
         },
         context: {
           type: 'string',
@@ -576,7 +576,7 @@ function makeArbitrateTool(ctx, config, getRoutes) {
           description: '可选：双方已收集的证据、命令输出、测试结果、网页来源。',
         },
       },
-      required: ['subject', 'main_position', 'critic_position'],
+      required: ['subject', 'main_position', 'reviewer_position'],
     },
     output: {
       schema: {
@@ -585,7 +585,7 @@ function makeArbitrateTool(ctx, config, getRoutes) {
         properties: {
           ruling: {
             type: 'string',
-            enum: ['uphold_main', 'uphold_critic', 'modified', 'need_more_evidence', 'error', 'unstructured'],
+            enum: ['uphold_main', 'uphold_reviewer', 'modified', 'need_more_evidence', 'error', 'unstructured'],
           },
           decision: { type: 'string' },
           reasoning: { type: 'string' },
@@ -603,7 +603,7 @@ function makeArbitrateTool(ctx, config, getRoutes) {
       const modelLabel = routeLabel(routes.arbiter)
       try {
         const prompt = buildArbitrationPrompt(args)
-        const { result } = await runChild(ctx, exec, 'rebuttal-arbiter', routes.arbiter, prompt, '反驳裁决')
+        const { result } = await runChild(ctx, exec, 'cross-review-arbiter', routes.arbiter, prompt, '交叉复核裁决')
         const rawText = extractText(result)
         if (result?.stopReason !== undefined && result.stopReason !== 'completed') {
           const diagnostic = typeof result.diagnostic === 'string' ? `：${result.diagnostic}` : ''
@@ -622,31 +622,31 @@ function makeArbitrateTool(ctx, config, getRoutes) {
 }
 
 function buildProtocol(routes) {
-  return `## 反驳式模式协议（Rebuttal Mode，强制）
+  return `## 交叉复核模式协议（Cross-Verification Mode，强制）
 
-你是主代理（main agent），但你的结论默认不可信，直到经过独立的「反驳者」审查。这个模式存在的目的，是防止模型把幻觉、遗漏、绕路、错误或未完成的验证当成“已完成”打勾。
+你是主代理（main agent），但你的结论默认不可信，直到经过独立的「复核者」审查。这个模式存在的目的，是防止模型把幻觉、遗漏、绕路、错误或未完成的验证当成“已完成”打勾。
 
-### 必须调用 \`rebuttal_review\` 的时机
+### 必须调用 \`cross_review\` 的时机
 1. 形成或改变方案、架构、需求理解、任务拆分、范围与验收标准时。
 2. 执行任何会修改文件/配置/环境/仓库的命令之前：write、edit、apply_patch、bash/pwsh、安装依赖、git commit/push、部署、删除、移动等。
 3. 对用户或团队宣称“完成/通过/修复/已测试/没问题/已交付”之前。
-4. 调用 \`ask_user_question\` 之前：把每个问题、全部选项、推荐项与理由交给反驳者。反驳者可以质疑选项本身、补充选项之外的方案、指出伪二选一或遗漏的用户决策。
+4. 调用 \`ask_user_question\` 之前：把每个问题、全部选项、推荐项与理由交给复核者。复核者可以质疑选项本身、补充选项之外的方案、指出伪二选一或遗漏的用户决策。
 5. 团队模式下，leader 的每个关键决策、分工、进度判断和最终答复。
 
 ### 调用方式
-\`rebuttal_review\` 会新开一个独立反驳子代理（默认模型：${routeLabel(routes.critic)}）。它看不到你的对话，所以 subject 必须自包含：目标、当前方案/命令原文、相关文件路径、已运行过的验证、你的依据。只读检索可以合并审查，但每个写操作/危险命令/用户问题/交付声明必须单独审查。
+\`cross_review\` 会新开一个独立复核子代理（默认模型：${routeLabel(routes.reviewer)}）。它看不到你的对话，所以 subject 必须自包含：目标、当前方案/命令原文、相关文件路径、已运行过的验证、你的依据。只读检索可以合并审查，但每个写操作/危险命令/用户问题/交付声明必须单独审查。
 
 ### 共识与裁决规则
-- \`consensus\`：可以继续。仍需按反驳者提出的非阻塞建议调整。
-- \`objection\`：不得继续。按 \`required_fixes\` 修改后，对同一 subject 重新调用 \`rebuttal_review\`，同一事项最多 3 轮。
-- 3 轮后仍 \`objection\`，或涉及安全、不可逆、重大范围分歧：调用 \`rebuttal_arbitrate\`，提交主代理立场与反驳者意见。裁决由 ${routeLabel(routes.arbiter)} 作出，具有约束力，必须执行 \`required_actions\`。
+- \`consensus\`：可以继续。仍需按复核者提出的非阻塞建议调整。
+- \`objection\`：不得继续。按 \`required_fixes\` 修改后，对同一 subject 重新调用 \`cross_review\`，同一事项最多 3 轮。
+- 3 轮后仍 \`objection\`，或涉及安全、不可逆、重大范围分歧：调用 \`cross_review_arbitrate\`，提交主代理立场与复核者意见。裁决由 ${routeLabel(routes.arbiter)} 作出，具有约束力，必须执行 \`required_actions\`。
 - \`error\` 或 \`unstructured\`：视为未达成共识；补齐信息后重试，绝不能当作通过。
 
 ### 团队模式（Agent Teams）
-- 团队任务开始时，Lead 必须创建一个名为 \`leader1\` 的常驻反驳队友。leader1 只做质疑与验收，不执行主任务，对 Lead 的决策、分工、进度和最终答复提出反对意见。
-- 每个职能队友对应一个反驳角色：需求分析→需求质疑者；前端开发→前端体验质疑者（重点：美观、简洁、一致性、可访问性、响应式、交互细节）；后端开发→后端健壮性/安全性质疑者；测试→测试有效性质疑者（覆盖、边界、假阳性）；文档→文档准确性质疑者；交付→交付验收质疑者。
-- 队友提交交付物前必须调用 \`rebuttal_review\`（或由 Lead 为其创建对应 critic 队友）。反驳者只读、可联网、可运行只读验证命令，不得修改交付物。
-- 任何成员不得用“已打勾”代替证据；没有反驳审查记录的完成声明无效。
+- 团队任务开始时，Lead 必须创建一个名为 \`leader1\` 的常驻复核队友。leader1 只做质疑与验收，不执行主任务，对 Lead 的决策、分工、进度和最终答复提出反对意见。
+- 每个职能队友对应一个复核角色：需求分析→需求质疑者；前端开发→前端体验质疑者（重点：美观、简洁、一致性、可访问性、响应式、交互细节）；后端开发→后端健壮性/安全性质疑者；测试→测试有效性质疑者（覆盖、边界、假阳性）；文档→文档准确性质疑者；交付→交付验收质疑者。
+- 队友提交交付物前必须调用 \`cross_review\`（或由 Lead 为其创建对应 reviewer 队友）。复核者只读、可联网、可运行只读验证命令，不得修改交付物。
+- 任何成员不得用“已打勾”代替证据；没有交叉复核记录的完成声明无效。
 
 ### 行为准则
 - 先证据后结论；不确定就说不确定并补验证。
@@ -655,11 +655,11 @@ function buildProtocol(routes) {
 }
 
 function liveRoutes(ctx, config) {
-  const service = ctx.get('rebuttalConfig')
+  const service = ctx.get('crossReviewConfig')
   const live = service !== undefined && typeof service.get === 'function' ? service.get() : undefined
   const source = live !== null && typeof live === 'object' ? live : config
   return {
-    critic: routeOf(source?.critic, DEFAULT_CRITIC),
+    reviewer: routeOf(source?.reviewer, DEFAULT_REVIEWER),
     arbiter: routeOf(source?.arbiter, DEFAULT_ARBITER),
   }
 }
@@ -671,7 +671,7 @@ export function apply(ctx, config = {}) {
   ctx.tools.register(makeArbitrateTool(ctx, policy, getRoutes))
   installGuard(ctx, policy)
   ctx.systemPrompt.section({
-    name: 'rebuttal:protocol',
+    name: 'cross-review:protocol',
     order: 150,
     text: () => buildProtocol(getRoutes()),
   })
@@ -679,7 +679,7 @@ export function apply(ctx, config = {}) {
 
 // Exported for local unit checks; not part of the Cordis contract.
 export {
-  DEFAULT_CRITIC,
+  DEFAULT_REVIEWER,
   DEFAULT_ARBITER,
   buildReviewPrompt,
   buildArbitrationPrompt,

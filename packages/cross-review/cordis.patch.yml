@@ -1,38 +1,38 @@
-# Rebuttal Mode bundle.
+# Cross-Verification Mode bundle.
 #
 # Declares one profile-level config row and three Agent presets:
-#   - rebuttal-config  : config service + /api/rebuttal-config + Settings page backend
-#   - rebuttal         : the main user-selectable mode
-#   - rebuttal-critic  : internal reviewer child (read-only + web + shell verification)
-#   - rebuttal-arbiter : internal tie-breaker child (GPT-6.1 Sol)
+#   - cross-review-config  : config service + /api/cross-review-config + Settings page backend
+#   - cross-review         : the main user-selectable mode
+#   - cross-review-reviewer  : internal reviewer child (read-only + web + shell verification)
+#   - cross-review-arbiter : internal tie-breaker child (GPT-6.1 Sol)
 #
-# The main preset also mounts the local `@local/dsh-rebuttal-mode` plugin, which
-# registers rebuttal_review / rebuttal_arbitrate and the execution guard.
+# The main preset also mounts the local `@local/dsh-cross-review` plugin, which
+# registers cross_review / cross_review_arbitrate and the execution guard.
 
 - insert:
-    # Profile-level model configuration store for Rebuttal Mode. It provides the
-    # `rebuttalConfig` service and the authenticated /api/rebuttal-config route
+    # Profile-level model configuration store for Cross-Verification Mode. It provides the
+    # `crossReviewConfig` service and the authenticated /api/cross-review-config route
     # used by the Settings page; it registers no tools or prompts itself.
-    - id: rebuttal-config
-      name: '@local/dsh-rebuttal-mode/config'
+    - id: cross-review-config
+      name: '@local/dsh-cross-review/config'
 
-    - id: preset-rebuttal
+    - id: preset-cross-review
       name: '@deepseek-ai/dsh-agent-preset'
       config:
-        id: rebuttal
-        name: 反驳式模式
+        id: cross-review
+        name: 交叉复核模式
         description: >-
-          主代理 + 影子反驳者：每个关键决策、命令、交付和用户提问先被独立质疑；
-          反驳者默认使用 Hy4.WorkBuddy 并联网/读文件验证，无法达成共识时由 GPT-6.1 Sol 裁决。
+          主代理 + 影子复核者：每个关键决策、命令、交付和用户提问先被独立质疑；
+          复核者默认使用 Hy4.WorkBuddy 并联网/读文件验证，无法达成共识时由 GPT-6.1 Sol 裁决。
         order: 5
         plugins:
           - id: persona
             name: '@deepseek-ai/dsh-persona'
             config:
               prefix: |
-                你是一个 coding agent，运行在 {{model}} 模型上，当前处于「反驳式模式（Rebuttal Mode）」。
-                你是主代理，但你的结论默认不可信，直到经过独立「反驳者」审查。每个关键步骤都必须先寻求反对意见，再执行或宣布完成。
-                被反驳是正常流程；隐藏、忽略或绕过反驳意见是失败。
+                你是一个 coding agent，运行在 {{model}} 模型上，当前处于「交叉复核模式（Cross-Verification Mode）」。
+                你是主代理，但你的结论默认不可信，直到经过独立「复核者」审查。每个关键步骤都必须先寻求反对意见，再执行或宣布完成。
+                被复核是正常流程；隐藏、忽略或绕过复核意见是失败。
           - id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
@@ -140,11 +140,11 @@
             config:
               fetch: true
               searchTimeoutMs: 60000
-          - id: rebuttal-mode
-            name: '@local/dsh-rebuttal-mode'
+          - id: cross-review
+            name: '@local/dsh-cross-review'
             config:
               enforceGuard: true
-              critic:
+              reviewer:
                 provider: magpie
                 model: workbuddy/hy4free
                 reasoningEffort: high
@@ -161,19 +161,19 @@
             name: '@deepseek-ai/dsh-plugin-market/tools'
             disabled: true
 
-    - id: preset-rebuttal-critic
+    - id: preset-cross-review-reviewer
       name: '@deepseek-ai/dsh-agent-preset'
       config:
-        id: rebuttal-critic
-        name: 反驳者（内部）
-        description: 反驳式模式的内部子代理预设；只做独立验证与质疑，不修改交付物。
+        id: cross-review-reviewer
+        name: 复核者（内部）
+        description: 交叉复核模式的内部子代理预设；只做独立验证与质疑，不修改交付物。
         order: 91
         plugins:
           - id: persona
             name: '@deepseek-ai/dsh-persona'
             config:
               prefix: |
-                你是「反驳者」（adversarial reviewer）。你的唯一职责是发现主代理或团队成员决策中的幻觉、遗漏、绕路、错误、过度自信，以及把未完成工作说成“已完成/已通过”的情况。
+                你是「复核者」（adversarial reviewer）。你的唯一职责是发现主代理或团队成员决策中的幻觉、遗漏、绕路、错误、过度自信，以及把未完成工作说成“已完成/已通过”的情况。
                 你是独立审查者，不是执行者：不要修改任何文件，不要安装依赖，不要提交或部署，不要执行有副作用的命令。你可以联网搜索、读取工作区文件、运行只读检查或测试来验证事实。
                 不要为了反对而编造问题；每一个反对都必须具体、可操作、有证据。证据不足时，要求主代理补充证据，而不是放行。
                 严格按用户消息中的输出格式返回结论。
@@ -220,19 +220,19 @@
                   headChars: 4096
                   tailChars: 1024
 
-    - id: preset-rebuttal-arbiter
+    - id: preset-cross-review-arbiter
       name: '@deepseek-ai/dsh-agent-preset'
       config:
-        id: rebuttal-arbiter
+        id: cross-review-arbiter
         name: 裁决者（内部）
-        description: 反驳式模式的内部裁决子代理预设；主代理与反驳者无法达成共识时做最终裁决。
+        description: 交叉复核模式的内部裁决子代理预设；主代理与复核者无法达成共识时做最终裁决。
         order: 92
         plugins:
           - id: persona
             name: '@deepseek-ai/dsh-persona'
             config:
               prefix: |
-                你是「裁决者」（arbiter）。主代理与反驳者已经无法达成共识，现在由你做最终裁决。你必须独立验证关键事实，不能简单偏袒任何一方。
+                你是「裁决者」（arbiter）。主代理与复核者已经无法达成共识，现在由你做最终裁决。你必须独立验证关键事实，不能简单偏袒任何一方。
                 你可以联网搜索、读取工作区文件、运行只读检查或测试；不要修改任何文件，不要安装依赖，不要提交或部署。
                 你的裁决具有约束力：主代理必须执行 required_actions。证据不足时返回 need_more_evidence，而不是猜测。
                 严格按用户消息中的输出格式返回结论。

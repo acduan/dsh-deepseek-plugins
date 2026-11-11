@@ -1,0 +1,3 @@
+- insert:
+    - id: cross-review-settings-ui
+      name: '@local/dsh-cross-review-settings-ui'

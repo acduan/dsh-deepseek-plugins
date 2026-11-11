@@ -6,8 +6,8 @@
 packages/
   recent-sessions/       左侧栏“最近会话”面板
   token-daily-stats/     Token 用量统计（设置页）
-  rebuttal-mode/         反驳式 Agent Preset（主模式 + 反驳者 + 裁决者）
-  rebuttal-settings-ui/  反驳式模式的模型配置设置页
+  cross-review/          交叉复核 Agent Preset（主模式 + 复核者 + 裁决者）
+  cross-review-settings-ui/  交叉复核模式的模型配置设置页
 ```
 
 ## 插件
@@ -30,27 +30,27 @@ packages/
 
 细节见 [packages/token-daily-stats/README.md](packages/token-daily-stats/README.md)。
 
-### 3) rebuttal-mode — `@local/dsh-rebuttal-mode`
+### 3) cross-review — `@local/dsh-cross-review`
 
-「反驳式模式」Agent Preset 的核心包：
+「交叉复核模式」Agent Preset 的核心包：
 
-- 用户可选择 `rebuttal` 模式，运行在主代理上；
-- 内置 `rebuttal-critic`（反驳者）与 `rebuttal-arbiter`（裁决者）两个内部预设；
-- 提供 `rebuttal_review` / `rebuttal_arbitrate` 工具与执行守卫；
-- 默认反驳模型为 **Hy4 · WorkBuddy**，默认裁决模型为 **GPT-6.1 Sol · PackyCode1**；
-- 模型可改，详见 `rebuttal-settings-ui`。
+- 用户可选择 `cross-review` 模式，运行在主代理上；
+- 内置 `cross-review-reviewer`（复核者）与 `cross-review-arbiter`（裁决者）两个内部预设；
+- 提供 `cross_review` / `cross_review_arbitrate` 工具与执行守卫；
+- 默认复核模型为 **Hy4 · WorkBuddy**，默认裁决模型为 **GPT-6.1 Sol · PackyCode1**；
+- 模型可改，详见 `cross-review-settings-ui`。
 
-细节见 [packages/rebuttal-mode/README.md](packages/rebuttal-mode/README.md)。
+细节见 [packages/cross-review/README.md](packages/cross-review/README.md)。
 
-### 4) rebuttal-settings-ui — `@local/dsh-rebuttal-settings-ui`
+### 4) cross-review-settings-ui — `@local/dsh-cross-review-settings-ui`
 
-「反驳式模式」的模型配置页：Settings → 反驳式模式，读取当前 DSH 可用 LLM providers/models，选择反驳模型和裁决模型。
+「交叉复核模式」的模型配置页：Settings → 交叉复核模式，读取当前 DSH 可用 LLM providers/models，选择复核模型和裁决模型。
 
-![反驳式模式设置页](docs/rebuttal-mode-settings.png)
+![交叉复核模式设置页](docs/cross-review-settings.png)
 
-![模型下拉列表](docs/rebuttal-mode-models.png)
+![模型下拉列表](docs/cross-review-models.png)
 
-细节见 [packages/rebuttal-settings-ui/README.md](packages/rebuttal-settings-ui/README.md)。
+细节见 [packages/cross-review-settings-ui/README.md](packages/cross-review-settings-ui/README.md)。
 
 ## dsh 插件规范 / 目录结构
 
@@ -87,10 +87,10 @@ dsh 的安装是**链接指向插件源码目录**（不是复制），所以请
 1. 在本机 dsh 中逐个安装包目录（等价于 `plugin_manager` 的 `install_bundle`，target = 包的绝对路径）：
    - `packages/recent-sessions`
    - `packages/token-daily-stats`
-   - `packages/rebuttal-mode`
-   - `packages/rebuttal-settings-ui`（必须与 `rebuttal-mode` 一起安装）
+   - `packages/cross-review`
+   - `packages/cross-review-settings-ui`（必须与 `cross-review` 一起安装）
 2. 安装会把 `@local/*` 写入目标 profile 的 `package.json`（`dependencies` 的 `link:` + `dsh.profile.bundles`）。
-3. `token-daily-stats`、`rebuttal-mode` 的 Host 半只在 dsh 启动时加载，安装后**重启 dsh**。
+3. `token-daily-stats`、`cross-review` 的 Host 半只在 dsh 启动时加载，安装后**重启 dsh**。
 
 ### 依赖与兼容性
 

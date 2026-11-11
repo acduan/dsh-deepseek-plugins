@@ -1,12 +1,12 @@
-// @local/dsh-rebuttal-mode/client
+// @local/dsh-cross-review/client
 // Browser half: a Settings section page with provider/model dropdowns for the
-// Rebuttal Mode critic and arbiter. The model catalog is read from the Host
-// route /api/rebuttal-config, which in turn reads the live DSH LLM provider
+// Cross-Verification Mode reviewer and arbiter. The model catalog is read from the Host
+// route /api/cross-review-config, which in turn reads the live DSH LLM provider
 // registry. The page writes the same route, so the selected routes persist in
 // the Host storage domain and are picked up by new tool calls immediately.
 
 window.__ModuleLoader__.load({
-  id: '@local/dsh-rebuttal-settings-ui',
+  id: '@local/dsh-cross-review-settings-ui',
   factory(require) {
     const React = require('react')
     const h = React.createElement
@@ -51,7 +51,7 @@ window.__ModuleLoader__.load({
     }
 
     function cloneDraft(config) {
-      return { critic: cloneRoute(config && config.critic), arbiter: cloneRoute(config && config.arbiter) }
+      return { reviewer: cloneRoute(config && config.reviewer), arbiter: cloneRoute(config && config.arbiter) }
     }
 
     function modelOptions(groups, provider, currentModel) {
@@ -122,7 +122,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'rbm-current' }, '当前：', h('code', null, providerName + ' / ' + modelName + (route.reasoningEffort ? ' / ' + route.reasoningEffort : ''))))
     }
 
-    function RebuttalSettingsPage() {
+    function CrossReviewSettingsPage() {
       const [data, setData] = useState(null)
       const [draft, setDraft] = useState(null)
       const [loading, setLoading] = useState(true)
@@ -134,7 +134,7 @@ window.__ModuleLoader__.load({
         setLoading(true)
         setError(null)
         try {
-          const response = await fetch('/api/rebuttal-config', { credentials: 'same-origin' })
+          const response = await fetch('/api/cross-review-config', { credentials: 'same-origin' })
           const body = await response.json()
           if (!response.ok || !body.ok) throw new Error(body.error || 'HTTP ' + response.status)
           setData(body)
@@ -178,10 +178,10 @@ window.__ModuleLoader__.load({
         setStatus(null)
         try {
           const payload = {
-            critic: { ...draft.critic, reasoningEffort: draft.critic.reasoningEffort || undefined },
+            reviewer: { ...draft.reviewer, reasoningEffort: draft.reviewer.reasoningEffort || undefined },
             arbiter: { ...draft.arbiter, reasoningEffort: draft.arbiter.reasoningEffort || undefined },
           }
-          const response = await fetch('/api/rebuttal-config', {
+          const response = await fetch('/api/cross-review-config', {
             method: 'PUT',
             credentials: 'same-origin',
             headers: { 'content-type': 'application/json' },
@@ -191,7 +191,7 @@ window.__ModuleLoader__.load({
           if (!response.ok || !body.ok) throw new Error(body.error || 'HTTP ' + response.status)
           setData((previous) => ({ ...previous, config: body.config, persistent: body.persistent }))
           setDraft(cloneDraft(body.config))
-          setStatus({ kind: 'ok', text: body.persistent ? '已保存，立即用于后续 rebuttal_review / rebuttal_arbitrate 调用。' : '已保存到当前进程（存储不可用，重启后会恢复默认值）。' })
+          setStatus({ kind: 'ok', text: body.persistent ? '已保存，立即用于后续 cross_review / cross_review_arbitrate 调用。' : '已保存到当前进程（存储不可用，重启后会恢复默认值）。' })
         } catch (saveError) {
           setStatus({ kind: 'error', text: '保存失败：' + (saveError instanceof Error ? saveError.message : String(saveError)) })
         } finally {
@@ -207,22 +207,22 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'rbm-root' },
         h('style', null, CSS),
         h('div', { className: 'rbm-header' },
-          h('h1', { className: 'rbm-title' }, '反驳式模式'),
-          h('p', { className: 'rbm-sub' }, '配置「反驳者」与「裁决者」使用的模型。选项来自当前 DSH 已配置且注册的 LLM providers，保存后立即作用于本模式的后续审查与裁决。')),
+          h('h1', { className: 'rbm-title' }, '交叉复核模式'),
+          h('p', { className: 'rbm-sub' }, '配置「复核者」与「裁决者」使用的模型。选项来自当前 DSH 已配置且注册的 LLM providers，保存后立即作用于本模式的后续审查与裁决。')),
         loading ? h('div', { className: 'rbm-empty' }, '正在读取当前可用模型…') : null,
         error ? h('div', { className: 'rbm-status rbm-status-error' }, '读取失败：' + error) : null,
         !loading && error ? h('div', { className: 'rbm-footer' }, h('button', { className: 'rbm-btn', onClick: load }, '重试')) : null,
         !loading && !error && draft !== null ? h(React.Fragment, null,
           h(RouteCard, {
-            title: '反驳模型（rebuttal_review）',
-            description: '独立反驳子代理使用的模型；默认 Hy4 · WorkBuddy，可改为当前 DSH 中任意可用模型。',
-            route: draft.critic,
+            title: '复核模型（cross_review）',
+            description: '独立复核子代理使用的模型；默认 Hy4 · WorkBuddy，可改为当前 DSH 中任意可用模型。',
+            route: draft.reviewer,
             groups,
-            onChange: (field, value) => onChange('critic', field, value),
+            onChange: (field, value) => onChange('reviewer', field, value),
           }),
           h(RouteCard, {
-            title: '裁决模型（rebuttal_arbitrate）',
-            description: '主代理与反驳者无法达成共识时，由该模型做最终裁决；默认 GPT-6.1 Sol · PackyCode1。',
+            title: '裁决模型（cross_review_arbitrate）',
+            description: '主代理与复核者无法达成共识时，由该模型做最终裁决；默认 GPT-6.1 Sol · PackyCode1。',
             route: draft.arbiter,
             groups,
             onChange: (field, value) => onChange('arbiter', field, value),
@@ -244,12 +244,12 @@ window.__ModuleLoader__.load({
         try {
           slots.inject('settings.section', () => slots.register({
             name: 'settings.section',
-            id: 'rebuttal-mode',
+            id: 'cross-review',
             order: 25,
-            label: '反驳式模式',
-          }, RebuttalSettingsPage))
+            label: '交叉复核模式',
+          }, CrossReviewSettingsPage))
         } catch (error) {
-          console.warn('dsh-rebuttal-mode: settings section registration failed:', error)
+          console.warn('dsh-cross-review: settings section registration failed:', error)
         }
       },
     }
