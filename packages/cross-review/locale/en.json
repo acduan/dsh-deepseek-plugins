@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Cross-Verification Mode",
-    "description": "Configure the reviewer and arbiter models used by Cross-Verification Mode."
+    "description": "Main agent, reviewer, and arbiter composition with its model settings page."
   }
 }

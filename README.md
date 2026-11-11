@@ -6,8 +6,7 @@
 packages/
   recent-sessions/       左侧栏“最近会话”面板
   token-daily-stats/     Token 用量统计（设置页）
-  cross-review/          交叉复核 Agent Preset（主模式 + 复核者 + 裁决者）
-  cross-review-settings-ui/  交叉复核模式的模型配置设置页
+  cross-review/          交叉复核模式：预设 + 复核工具 + 模型设置页（单一插件）
 ```
 
 ## 插件
@@ -32,25 +31,19 @@ packages/
 
 ### 3) cross-review — `@local/dsh-cross-review`
 
-「交叉复核模式」Agent Preset 的核心包：
+「交叉复核模式」的**单一** bundle 包，同时提供：
 
-- 用户可选择 `cross-review` 模式，运行在主代理上；
-- 内置 `cross-review-reviewer`（复核者）与 `cross-review-arbiter`（裁决者）两个内部预设；
-- 提供 `cross_review` / `cross_review_arbitrate` 工具与执行守卫；
-- 默认复核模型为 **Hy4 · WorkBuddy**，默认裁决模型为 **GPT-6.1 Sol · PackyCode1**；
-- 模型可改，详见 `cross-review-settings-ui`。
+- `cross-review` 主模式、`cross-review-internal` 内部只读预设；
+- `cross_review` / `cross_review_arbitrate` 工具与执行守卫；
+- **Settings → 交叉复核模式** 模型设置页（Host 路由 `/api/cross-review-config`）。
 
-细节见 [packages/cross-review/README.md](packages/cross-review/README.md)。
-
-### 4) cross-review-settings-ui — `@local/dsh-cross-review-settings-ui`
-
-「交叉复核模式」的模型配置页：Settings → 交叉复核模式，读取当前 DSH 可用 LLM providers/models，选择复核模型和裁决模型。
+默认复核模型为 **Hy4 · WorkBuddy**，默认裁决模型为 **GPT-6.1 Sol · PackyCode1**，可在设置页改为当前 DSH 任意可用模型。
 
 ![交叉复核模式设置页](docs/cross-review-settings.png)
 
 ![模型下拉列表](docs/cross-review-models.png)
 
-细节见 [packages/cross-review-settings-ui/README.md](packages/cross-review-settings-ui/README.md)。
+细节见 [packages/cross-review/README.md](packages/cross-review/README.md)。
 
 ## dsh 插件规范 / 目录结构
 
@@ -80,6 +73,8 @@ packages/
 }
 ```
 
+一个包可以导出多个子路径入口（例如 `cross-review` 的 `./preset`），由 `cordis.patch.yml` 的不同行分别挂载。
+
 ## 安装（本地 bundle 安装）
 
 dsh 的安装是**链接指向插件源码目录**（不是复制），所以请把仓库放在稳定目录，安装后不要随意移动/删除。
@@ -88,7 +83,6 @@ dsh 的安装是**链接指向插件源码目录**（不是复制），所以请
    - `packages/recent-sessions`
    - `packages/token-daily-stats`
    - `packages/cross-review`
-   - `packages/cross-review-settings-ui`（必须与 `cross-review` 一起安装）
 2. 安装会把 `@local/*` 写入目标 profile 的 `package.json`（`dependencies` 的 `link:` + `dsh.profile.bundles`）。
 3. `token-daily-stats`、`cross-review` 的 Host 半只在 dsh 启动时加载，安装后**重启 dsh**。
 
@@ -97,6 +91,7 @@ dsh 的安装是**链接指向插件源码目录**（不是复制），所以请
 - 需与插件源码对应的 dsh 版本（客户端 slot 与 `@deepseek-ai/dsh-client-ui-primitives` 接口相关），跨大版本可能不显示或报错。
 - “打开所在文件夹”使用 dsh 自带 `dsh-host-open-in-app` 的 `/open-in-app/apps` 与 `/open-in-app/open` 路由；标准 Web 配置默认包含。
 - “归档会话”调用宿主 `uiWorkspace.archiveSession`；会话正在工作时可能被宿主拒绝。
+- 交叉复核模式的预设是 eager 加载，插件已尽量精简预设内的子插件以控制启动开销。
 
 ## 许可证
 

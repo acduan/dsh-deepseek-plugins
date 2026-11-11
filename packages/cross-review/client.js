@@ -6,7 +6,7 @@
 // the Host storage domain and are picked up by new tool calls immediately.
 
 window.__ModuleLoader__.load({
-  id: '@local/dsh-cross-review-settings-ui',
+  id: '@local/dsh-cross-review',
   factory(require) {
     const React = require('react')
     const h = React.createElement

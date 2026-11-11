@@ -1,20 +1,21 @@
 # Cross-Verification Mode bundle.
 #
-# Declares one profile-level config row and three Agent presets:
-#   - cross-review-config  : config service + /api/cross-review-config + Settings page backend
-#   - cross-review         : the main user-selectable mode
-#   - cross-review-reviewer  : internal reviewer child (read-only + web + shell verification)
-#   - cross-review-arbiter : internal tie-breaker child (GPT-6.1 Sol)
+# One bundle package supplies:
+#   - the profile-level config service + /api/cross-review-config route;
+#   - the browser Settings page;
+#   - three Agent presets:
+#       cross-review          : the main user-selectable mode
+#       cross-review-reviewer : internal reviewer child (read-only + web + shell verification)
+#       cross-review-arbiter  : internal tie-breaker child (GPT-6.1 Sol)
 #
-# The main preset also mounts the local `@local/dsh-cross-review` plugin, which
-# registers cross_review / cross_review_arbitrate and the execution guard.
+# The main preset mounts the package's `./preset` entry, which registers
+# cross_review / cross_review_arbitrate and the execution guard.
 
 - insert:
-    # Profile-level model configuration store for Cross-Verification Mode. It provides the
-    # `crossReviewConfig` service and the authenticated /api/cross-review-config route
-    # used by the Settings page; it registers no tools or prompts itself.
-    - id: cross-review-config
-      name: '@local/dsh-cross-review/config'
+    # Combined host row: config service + authenticated /api/cross-review-config route.
+    # The same package's Client half registers the "Settings → 交叉复核模式" page.
+    - id: cross-review
+      name: '@local/dsh-cross-review'
 
     - id: preset-cross-review
       name: '@deepseek-ai/dsh-agent-preset'
@@ -123,12 +124,6 @@
                 config:
                   provider: fork
                   toolName: subagent_fork
-              - id: workflow-ptc
-                name: '@deepseek-ai/dsh-workflow-ptc'
-                config:
-                  provider: spawn
-              - id: tool-workflow
-                name: '@deepseek-ai/dsh-tool-workflow'
           - id: tool-ask-user
             name: '@deepseek-ai/dsh-tool-ask-user'
           - id: tool-todo
@@ -140,10 +135,12 @@
             config:
               fetch: true
               searchTimeoutMs: 60000
-          - id: cross-review
-            name: '@local/dsh-cross-review'
+          - id: cross-review-preset
+            name: '@local/dsh-cross-review/preset'
             config:
               enforceGuard: true
+              reviewUses: 8
+              reviewTimeoutMs: 180000
               reviewer:
                 provider: magpie
                 model: workbuddy/hy4free
@@ -161,22 +158,25 @@
             name: '@deepseek-ai/dsh-plugin-market/tools'
             disabled: true
 
-    - id: preset-cross-review-reviewer
+    # One shared read-only internal preset serves both the reviewer and the
+    # arbiter. Their role is stated by the task prompt, so a single preset keeps
+    # the eager startup mount cost down to one composition instead of two.
+    - id: preset-cross-review-internal
       name: '@deepseek-ai/dsh-agent-preset'
       config:
-        id: cross-review-reviewer
-        name: 复核者（内部）
-        description: 交叉复核模式的内部子代理预设；只做独立验证与质疑，不修改交付物。
+        id: cross-review-internal
+        name: 复核者 / 裁决者（内部）
+        description: 交叉复核模式的内部只读子代理预设；角色由任务消息指定，只验证不修改交付物。
         order: 91
         plugins:
           - id: persona
             name: '@deepseek-ai/dsh-persona'
             config:
               prefix: |
-                你是「复核者」（adversarial reviewer）。你的唯一职责是发现主代理或团队成员决策中的幻觉、遗漏、绕路、错误、过度自信，以及把未完成工作说成“已完成/已通过”的情况。
+                你是「交叉复核模式」的内部只读子代理，可能担任「复核者」或「裁决者」。你的唯一职责是发现主代理或团队成员决策中的幻觉、遗漏、绕路、错误、过度自信，以及把未完成工作说成“已完成/已通过”的情况。
                 你是独立审查者，不是执行者：不要修改任何文件，不要安装依赖，不要提交或部署，不要执行有副作用的命令。你可以联网搜索、读取工作区文件、运行只读检查或测试来验证事实。
                 不要为了反对而编造问题；每一个反对都必须具体、可操作、有证据。证据不足时，要求主代理补充证据，而不是放行。
-                严格按用户消息中的输出格式返回结论。
+                严格按用户消息中指定的角色和输出格式返回结论。
           - id: time-context
             name: '@deepseek-ai/dsh-time-context'
           - id: tool-bash
@@ -202,79 +202,3 @@
             config:
               fetch: true
               searchTimeoutMs: 60000
-          - id: compaction
-            name: cordis:group
-            group: true
-            isolate:
-              compaction: true
-              toolResultPruner: true
-            config:
-              - id: compaction-basic
-                name: '@deepseek-ai/dsh-compaction-basic'
-              - id: command-compact
-                name: '@deepseek-ai/dsh-command-compact'
-              - id: tool-result-pruner
-                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
-                config:
-                  thresholdChars: 8192
-                  headChars: 4096
-                  tailChars: 1024
-
-    - id: preset-cross-review-arbiter
-      name: '@deepseek-ai/dsh-agent-preset'
-      config:
-        id: cross-review-arbiter
-        name: 裁决者（内部）
-        description: 交叉复核模式的内部裁决子代理预设；主代理与复核者无法达成共识时做最终裁决。
-        order: 92
-        plugins:
-          - id: persona
-            name: '@deepseek-ai/dsh-persona'
-            config:
-              prefix: |
-                你是「裁决者」（arbiter）。主代理与复核者已经无法达成共识，现在由你做最终裁决。你必须独立验证关键事实，不能简单偏袒任何一方。
-                你可以联网搜索、读取工作区文件、运行只读检查或测试；不要修改任何文件，不要安装依赖，不要提交或部署。
-                你的裁决具有约束力：主代理必须执行 required_actions。证据不足时返回 need_more_evidence，而不是猜测。
-                严格按用户消息中的输出格式返回结论。
-          - id: time-context
-            name: '@deepseek-ai/dsh-time-context'
-          - id: tool-bash
-            name: '@deepseek-ai/dsh-tool-bash'
-            disabled: !!js process.platform === 'win32'
-          - id: tool-pwsh
-            name: '@deepseek-ai/dsh-tool-pwsh'
-            disabled: !!js process.platform !== 'win32'
-          - id: tool-fs
-            name: '@deepseek-ai/dsh-tool-fs'
-            config:
-              read: true
-              readImage: false
-              write: false
-              edit: false
-              applyPatch: false
-          - id: tool-fs-search
-            name: '@deepseek-ai/dsh-tool-fs-search'
-            config:
-              sampleOverCapGlobResults: false
-          - id: tool-web
-            name: '@deepseek-ai/dsh-tool-web'
-            config:
-              fetch: true
-              searchTimeoutMs: 60000
-          - id: compaction
-            name: cordis:group
-            group: true
-            isolate:
-              compaction: true
-              toolResultPruner: true
-            config:
-              - id: compaction-basic
-                name: '@deepseek-ai/dsh-compaction-basic'
-              - id: command-compact
-                name: '@deepseek-ai/dsh-command-compact'
-              - id: tool-result-pruner
-                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
-                config:
-                  thresholdChars: 8192
-                  headChars: 4096
-                  tailChars: 1024
