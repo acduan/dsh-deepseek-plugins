@@ -1,0 +1,28 @@
+{
+  "name": "@local/dsh-rebuttal-mode",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Rebuttal Mode: adversarial shadow review for every material step, with Hy4.WorkBuddy critic and GPT-6.1 Sol arbitration.",
+  "license": "MIT",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./config": "./config.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "config.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

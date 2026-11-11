@@ -1,0 +1,3 @@
+- insert:
+    - id: rebuttal-settings-ui
+      name: '@local/dsh-rebuttal-settings-ui'

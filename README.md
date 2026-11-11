@@ -4,8 +4,10 @@
 
 ```
 packages/
-  recent-sessions/      左侧栏“最近会话”面板
-  token-daily-stats/    Token 用量统计（设置页）
+  recent-sessions/       左侧栏“最近会话”面板
+  token-daily-stats/     Token 用量统计（设置页）
+  rebuttal-mode/         反驳式 Agent Preset（主模式 + 反驳者 + 裁决者）
+  rebuttal-settings-ui/  反驳式模式的模型配置设置页
 ```
 
 ## 插件
@@ -28,6 +30,28 @@ packages/
 
 细节见 [packages/token-daily-stats/README.md](packages/token-daily-stats/README.md)。
 
+### 3) rebuttal-mode — `@local/dsh-rebuttal-mode`
+
+「反驳式模式」Agent Preset 的核心包：
+
+- 用户可选择 `rebuttal` 模式，运行在主代理上；
+- 内置 `rebuttal-critic`（反驳者）与 `rebuttal-arbiter`（裁决者）两个内部预设；
+- 提供 `rebuttal_review` / `rebuttal_arbitrate` 工具与执行守卫；
+- 默认反驳模型为 **Hy4 · WorkBuddy**，默认裁决模型为 **GPT-6.1 Sol · PackyCode1**；
+- 模型可改，详见 `rebuttal-settings-ui`。
+
+细节见 [packages/rebuttal-mode/README.md](packages/rebuttal-mode/README.md)。
+
+### 4) rebuttal-settings-ui — `@local/dsh-rebuttal-settings-ui`
+
+「反驳式模式」的模型配置页：Settings → 反驳式模式，读取当前 DSH 可用 LLM providers/models，选择反驳模型和裁决模型。
+
+![反驳式模式设置页](docs/rebuttal-mode-settings.png)
+
+![模型下拉列表](docs/rebuttal-mode-models.png)
+
+细节见 [packages/rebuttal-settings-ui/README.md](packages/rebuttal-settings-ui/README.md)。
+
 ## dsh 插件规范 / 目录结构
 
 每个插件包都是一个独立的 dsh bundle：
@@ -37,7 +61,7 @@ packages/
   package.json         # 声明 dsh.bundle.patch 与 dsh.client
   cordis.patch.yml     # bundle 的 patch 层（insert 插件行）
   index.js             # Host 半（可为空实现）
-  client.js            # Client 半（window.__ModuleLoader__.load 模块）
+  client.js            # Client 半（有 Web UI 时；window.__ModuleLoader__.load 模块）
   locale/en.json       # 插件管理展示用 title/description
   locale/zh.json
   icon.svg             # 插件图标（<=256KiB）
@@ -63,8 +87,10 @@ dsh 的安装是**链接指向插件源码目录**（不是复制），所以请
 1. 在本机 dsh 中逐个安装包目录（等价于 `plugin_manager` 的 `install_bundle`，target = 包的绝对路径）：
    - `packages/recent-sessions`
    - `packages/token-daily-stats`
+   - `packages/rebuttal-mode`
+   - `packages/rebuttal-settings-ui`（必须与 `rebuttal-mode` 一起安装）
 2. 安装会把 `@local/*` 写入目标 profile 的 `package.json`（`dependencies` 的 `link:` + `dsh.profile.bundles`）。
-3. `token-daily-stats` 的 Host 半只在 dsh 启动时加载，安装后**重启 dsh**。
+3. `token-daily-stats`、`rebuttal-mode` 的 Host 半只在 dsh 启动时加载，安装后**重启 dsh**。
 
 ### 依赖与兼容性
 
