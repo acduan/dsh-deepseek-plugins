@@ -313,10 +313,6 @@ export async function apply(ctx) {
     }
   }
 
-  // --- 3. Reconcile against the full session corpus (authoritative backfill),
-  //        then keep the forward listener for live increments. ---
-  await reconcile()
-
   // --- 4. Authenticated read route for the browser. ---
   let offRoute
   try {
@@ -370,7 +366,19 @@ export async function apply(ctx) {
     offRoute = undefined
   }
 
-  // --- 5. One activation line. This is the first thing to look at when the
+  // --- 5. Reconcile in the background.
+  //        The corpus scan decompresses and replay-validates every session log,
+  //        which costs seconds on a large history (60MB / 161 sessions here).
+  //        Awaiting it here held the whole profile activation — and therefore
+  //        dsh startup — hostage, so it starts after the window is up and only
+  //        refreshes the in-memory buckets. The persisted days loaded above
+  //        serve the UI meanwhile, and the forward listener keeps counting live
+  //        traffic. ---
+  const reconcileTimer = setTimeout(() => {
+    reconcile().catch((error) => warn(`background reconciliation failed: ${error}`))
+  }, 2500)
+
+  // --- 6. One activation line. This is the first thing to look at when the
   //        settings page is empty after a DSH update: it says exactly which
   //        seams attached and how much history the Host is holding. ---
   try {
@@ -383,13 +391,14 @@ export async function apply(ctx) {
     )
   } catch { /* logging must never break activation */ }
 
-  // --- 6. Fiber-scoped cleanup. Disposers are awaited: DSH 0.2.x returns
+  // --- 7. Fiber-scoped cleanup. Disposers are awaited: DSH 0.2.x returns
   //        Promises from both `offRoute` and `domain.close`. ---
   ctx.effect(() => async () => {
     try {
       offEvent()
     } catch { /* already detached */ }
     if (persistTimer !== undefined) clearTimeout(persistTimer)
+    if (reconcileTimer !== undefined) clearTimeout(reconcileTimer)
     if (offRoute !== undefined) {
       try {
         await offRoute()
@@ -409,7 +418,19 @@ export async function apply(ctx) {
    * Each session tracks its latest `request/header` as a model fallback for
    * logs that predate per-message source metadata.
    */
+  let reconciling = false
+
   async function reconcile() {
+    if (reconciling) return
+    reconciling = true
+    try {
+      await reconcileOnce()
+    } finally {
+      reconciling = false
+    }
+  }
+
+  async function reconcileOnce() {
     const query = ctx.get('sessionQuery')
     if (!hasMethods(query, 'listSessions', 'readSession')) return
     let fresh
