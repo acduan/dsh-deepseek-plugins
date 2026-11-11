@@ -144,7 +144,9 @@ function normalizeReview(parsed, rawText, modelLabel) {
   const record = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
   let verdict = typeof record.verdict === 'string' ? record.verdict.toLowerCase() : ''
   if (['pass', 'passed', 'agree', 'agreed', 'consensus', 'ok'].includes(verdict)) verdict = 'consensus'
-  else if (['fail', 'failed', 'disagree', 'objection', 'reject', 'blocked'].includes(verdict)) verdict = 'objection'
+  else if (['caution', 'proceed_with_caution', 'conditional', 'proceed', 'watch'].includes(verdict)) {
+    verdict = 'proceed_with_caution'
+  } else if (['fail', 'failed', 'disagree', 'objection', 'reject', 'blocked'].includes(verdict)) verdict = 'objection'
   else if (record.agree === true || record.passed === true) verdict = 'consensus'
   else if (record.agree === false || record.passed === false) verdict = 'objection'
   else verdict = 'unstructured'
@@ -155,6 +157,11 @@ function normalizeReview(parsed, rawText, modelLabel) {
   const alternatives = toStrArray(record.alternatives)
   const requiredFixes = toStrArray(record.required_fixes ?? record.requiredFixes)
   const evidence = toStrArray(record.evidence)
+  // Supervision + guidance output. These are advisory: they never block a step,
+  // but they are surfaced back to the main agent so it keeps them in view.
+  const guidance = toStrArray(record.guidance ?? record.direction)
+  const focusNext = toStrArray(record.focus_next ?? record.focusNext)
+  const watchpoints = toStrArray(record.watchpoints ?? record.watch)
   const summary =
     (typeof record.summary === 'string' && record.summary.trim()) ||
     (typeof record.reasoning === 'string' && record.reasoning.trim()) ||
@@ -163,11 +170,15 @@ function normalizeReview(parsed, rawText, modelLabel) {
       ? `复核者返回了非结构化结论，按未达成共识处理。原文：${truncate(rawText, 1200)}`
       : verdict === 'consensus'
         ? '复核者未发现实质性反对意见。'
-        : '复核者提出了反对意见。')
+        : verdict === 'proceed_with_caution'
+          ? '复核者允许继续，但要求主代理盯住若干风险点。'
+          : '复核者提出了反对意见。')
 
-  // A "consensus" verdict cannot carry blocking objections: fail closed.
-  const blocking = objections.length + omissions.length + risks.length + requiredFixes.length
+  // Only a real blocker blocks. Warnings and suggestions are guidance, not gates:
+  // treating every remark as an objection is what made this mode feel slow.
+  const blocking = objections.length + requiredFixes.length
   if (verdict === 'consensus' && blocking > 0) verdict = 'objection'
+  if (verdict === 'proceed_with_caution' && blocking > 0) verdict = 'objection'
 
   return {
     verdict,
@@ -176,6 +187,9 @@ function normalizeReview(parsed, rawText, modelLabel) {
     omissions,
     risks,
     alternatives,
+    guidance,
+    focus_next: focusNext,
+    watchpoints,
     required_fixes: requiredFixes,
     evidence,
     reviewer_model: modelLabel,
@@ -218,6 +232,9 @@ function errorReview(message, modelLabel) {
   return {
     verdict: 'error',
     summary: truncate(message, 2000),
+    guidance: [],
+    focus_next: [],
+    watchpoints: [],
     objections: [],
     omissions: [],
     risks: [],
@@ -309,9 +326,9 @@ function checklistFor(category, role) {
 function buildReviewPrompt(args) {
   const category = typeof args.category === 'string' ? args.category : 'other'
   const options = Array.isArray(args.options) ? args.options.filter((item) => typeof item === 'string') : []
-  return `你是「复核者」（adversarial reviewer）。你不是主代理的助手，你的职责是主动寻找主代理决策中的幻觉、遗漏、绕路、错误、过度自信和“未验证就打勾”。
+  return `你是「复核者」（supervisor）。你在过程中的角色是**监督 + 引导**，不是拦路审批。
 
-主代理即将执行或已经形成的步骤（只以这段材料为准，你无法看到主代理的对话）：
+主代理当前所处的步骤或决定（只以这段材料为准，你看不到主代理的对话）：
 ---BEGIN SUBJECT---
 ${args.subject}
 ---END SUBJECT---
@@ -322,13 +339,22 @@ ${options.length > 0 ? `\n主代理准备让用户选择的选项（请检查选
 ${args.context ? `\n主代理补充的上下文：\n${args.context}` : ''}
 ${args.evidence ? `\n主代理声称已经完成的验证：\n${args.evidence}` : ''}
 
+你的职责分三层，按重要性排序：
+1. **引导（guidance）**：告诉主代理下一步最该做什么、最省力的正确路径是什么、有哪些现成的东西可以直接用而不必重造。这是你最有价值的输出。
+2. **监督（watchpoints）**：指出这条路上最容易翻车的点，让主代理在过程中自己盯住，而不是等出错再返工。
+3. **拦截（objections）**：只在**会导致返工、数据损坏、安全风险、或明显与用户目标相反**时才提出。措辞偏好、可优化但非必须、锦上添花的建议一律放进 guidance，不要放这里。
+
+判定规则（很重要，不要过度拦截）：
+- consensus：步骤可行，没有阻塞问题。即使你有改进建议也用这个，建议写进 guidance。
+- proceed_with_caution：可以做，但存在需要盯住的风险。把风险写进 watchpoints。
+- objection：**仅当**继续下去一定会出错或造成不可逆后果时才用。此时必须在 objections 里写清"会发生什么"。
+
 工作要求：
-1. 不要相信主代理的结论。能验证的必须独立验证：用 web_search/web_fetch 查外部事实与最新行为；用 read/glob/grep 检查工作区真实代码与文件；可以运行只读命令或测试来复核，但绝对不要修改任何文件、不要安装依赖、不要执行有副作用的命令。
-2. 只提出具体、可操作、有证据的反对意见。不要为了反对而编造问题，也不要因为“看起来差不多”就放行。
-3. 如果某项关键事实无法验证，把它列为 required_fixes，要求主代理补充证据或缩小结论范围。
-4. 如果主代理的步骤确实成立且证据充分，返回 consensus；否则返回 objection。
-5. 最后只输出一个 JSON 对象，不要输出 Markdown 代码围栏，不要输出 JSON 之外的文字：
-{"verdict":"consensus|objection","summary":"一句话结论","objections":["..."],"omissions":["..."],"risks":["..."],"alternatives":["..."],"required_fixes":["..."],"evidence":["你实际验证了什么，结论是什么"]}`
+1. 能验证的独立验证：用 read/glob/grep 看真实代码与文件；只读命令或测试可以跑，但绝对不要修改任何文件、不要安装依赖、不要执行有副作用的命令。
+2. 不要为了显得严格而编造问题；也不要因为"看起来差不多"就放过真实缺陷。
+3. 如果某项关键事实你无法验证，写进 watchpoints 提醒主代理自己补证据，而不是直接判 objection。
+4. 最后只输出一个 JSON 对象，不要 Markdown 代码围栏，不要 JSON 之外的文字：
+{"verdict":"consensus|proceed_with_caution|objection","summary":"一句话结论","guidance":["下一步该做什么、更省力的路径"],"focus_next":["接下来最该优先处理的事项"],"watchpoints":["过程中要盯住的风险点"],"objections":["仅限会导致返工/损坏/安全问题的阻塞项"],"risks":["..."],"alternatives":["..."],"required_fixes":["仅限 objection 时必须先修的项"],"evidence":["你实际验证了什么，结论是什么"]}`
 }
 
 function buildArbitrationPrompt(args) {
@@ -353,6 +379,47 @@ ${args.evidence ? `已有证据：\n${args.evidence}\n` : ''}
 3. 你的裁决是最终结果，主代理必须执行 required_actions。
 4. 最后只输出一个 JSON 对象，不要输出 Markdown 代码围栏，不要输出 JSON 之外的文字：
 {"ruling":"uphold_main|uphold_reviewer|modified|need_more_evidence","decision":"最终决定","reasoning":"裁决理由","required_actions":["主代理必须执行的动作"]}`
+}
+
+function buildBriefPrompt(args) {
+  return `你是「裁决者」（arbiter），本次担任**需求解析**。主代理还没开工，你先把需求整理成可执行、可验收的规格，避免主代理理解偏差后返工。
+
+用户原始需求（只以这段材料为准，你看不到用户与主代理的对话）：
+---BEGIN SUBJECT---
+${args.requirement}
+---END SUBJECT---
+
+${args.context ? `补充上下文：\n${args.context}\n` : ''}
+${args.constraints ? `已知约束：\n${args.constraints}\n` : ''}
+工作要求：
+1. 用 read/glob/grep 查看工作区真实现状，把需求落到具体文件/模块上；不要凭空假设。
+2. 只做需求解析，不要开始实现，不要修改任何文件。
+3. 明确指出需求中模糊、矛盾、缺失的地方：能合理推断的写进 assumptions，不能推断的写进 open_questions。
+4. 验收标准必须可观察、可验证，不要写"体验良好"这类无法检验的条目。
+5. 最后只输出一个 JSON 对象，不要 Markdown 代码围栏，不要 JSON 之外的文字：
+{"goal":"一句话目标","in_scope":["必须做的"],"out_of_scope":["明确不做的"],"acceptance_criteria":["可验证的验收标准"],"assumptions":["你做的合理推断"],"open_questions":["必须问用户才能确定的"],"risks":["主要风险"],"suggested_steps":["建议的执行顺序"]}`
+}
+
+function buildFinalAuditPrompt(args) {
+  return `你是「裁决者」（arbiter），本次担任**交付审核**。主代理声称已经完成，你要逐条对照验收标准核查，而不是听它自己说"做完了"。
+
+需求与验收标准：
+---BEGIN SUBJECT---
+${args.requirement}
+---END SUBJECT---
+
+主代理的交付声明：
+${args.claim}
+
+${args.evidence ? `主代理提供的证据：\n${args.evidence}\n` : ''}
+${args.context ? `补充上下文：\n${args.context}\n` : ''}
+审核规则：
+1. **必须自己验证**，不要相信主代理的声明。用 read/glob/grep 检查真实文件；只读命令或测试可以跑；不要修改任何文件。
+2. 逐条核对验收标准，每条给出 pass / fail / unverified 与依据。
+3. 特别检查这些常见虚假完成：声称改了但文件没变、声称测试通过但没有输出、只做了一部分却说全部完成、把"能编译"当成"功能正确"、留下未处理的警告或 TODO 却报告已完成。
+4. 只要有任何一条验收标准 fail 或关键项 unverified，就返回 not_ready。
+5. 最后只输出一个 JSON 对象，不要 Markdown 代码围栏，不要 JSON 之外的文字：
+{"ruling":"ready|not_ready|need_more_evidence","summary":"一句话结论","criteria":[{"item":"验收标准原文","status":"pass|fail|unverified","evidence":"你验证了什么"}],"blocking_issues":["必须修完才能交付的"],"required_actions":["主代理接下来必须做的"],"reasoning":"审核理由"}`
 }
 
 function abortError(signal) {
@@ -521,9 +588,12 @@ function makeReviewTool(ctx, config, getRoutes) {
         properties: {
           verdict: {
             type: 'string',
-            enum: ['consensus', 'objection', 'error', 'unstructured'],
+            enum: ['consensus', 'proceed_with_caution', 'objection', 'error', 'unstructured'],
           },
           summary: { type: 'string' },
+          guidance: { type: 'array', items: { type: 'string' } },
+          focus_next: { type: 'array', items: { type: 'string' } },
+          watchpoints: { type: 'array', items: { type: 'string' } },
           objections: { type: 'array', items: { type: 'string' } },
           omissions: { type: 'array', items: { type: 'string' } },
           risks: { type: 'array', items: { type: 'string' } },
@@ -536,6 +606,9 @@ function makeReviewTool(ctx, config, getRoutes) {
         required: [
           'verdict',
           'summary',
+          'guidance',
+          'focus_next',
+          'watchpoints',
           'objections',
           'omissions',
           'risks',
@@ -563,9 +636,11 @@ function makeReviewTool(ctx, config, getRoutes) {
         }
         const parsed = parseJsonLoose(rawText)
         const normalized = normalizeReview(parsed, rawText, modelLabel)
+        // Both outcomes authorize the guarded call: `proceed_with_caution`
+        // carries supervision notes, not a blocker. Only `objection` refuses.
         if (
           config.enforceGuard !== false &&
-          normalized.verdict === 'consensus' &&
+          (normalized.verdict === 'consensus' || normalized.verdict === 'proceed_with_caution') &&
           typeof sessionId === 'string' &&
           sessionId.length > 0
         ) {
@@ -658,37 +733,311 @@ function makeArbitrateTool(ctx, config, getRoutes) {
   }
 }
 
+function normalizeBrief(parsed, rawText, modelLabel) {
+  const record = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  return {
+    goal: truncate(
+      (typeof record.goal === 'string' && record.goal.trim()) ||
+        (typeof record.summary === 'string' && record.summary.trim()) ||
+        '需求已解析',
+      1200,
+    ),
+    in_scope: toStrArray(record.in_scope ?? record.inScope),
+    out_of_scope: toStrArray(record.out_of_scope ?? record.outOfScope),
+    acceptance_criteria: toStrArray(record.acceptance_criteria ?? record.acceptanceCriteria),
+    assumptions: toStrArray(record.assumptions),
+    open_questions: toStrArray(record.open_questions ?? record.openQuestions),
+    risks: toStrArray(record.risks),
+    suggested_steps: toStrArray(record.suggested_steps ?? record.suggestedSteps),
+    arbiter_model: modelLabel,
+    raw: truncate(rawText, 12000),
+  }
+}
+
+function normalizeFinalAudit(parsed, rawText, modelLabel) {
+  const record = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  let ruling = typeof record.ruling === 'string' ? record.ruling.toLowerCase() : ''
+  if (['ready', 'pass', 'passed', 'approved', 'ok'].includes(ruling)) ruling = 'ready'
+  else if (['not_ready', 'notready', 'fail', 'failed', 'rejected', 'block'].includes(ruling)) ruling = 'not_ready'
+  else if (['need_more_evidence', 'insufficient', 'unverified'].includes(ruling)) ruling = 'need_more_evidence'
+  else ruling = 'unstructured'
+
+  const criteria = []
+  if (Array.isArray(record.criteria)) {
+    for (const item of record.criteria) {
+      if (item === null || typeof item !== 'object') continue
+      const label = typeof item.item === 'string' ? item.item : ''
+      if (label === '') continue
+      let status = typeof item.status === 'string' ? item.status.toLowerCase() : ''
+      if (!['pass', 'fail', 'unverified'].includes(status)) status = 'unverified'
+      criteria.push({
+        item: truncate(label, 500),
+        status,
+        evidence: truncate(typeof item.evidence === 'string' ? item.evidence : '', 1000),
+      })
+    }
+  }
+
+  const blocking = toStrArray(record.blocking_issues ?? record.blockingIssues)
+  const requiredActions = toStrArray(record.required_actions ?? record.requiredActions)
+  const hardFailures = criteria.filter((item) => item.status === 'fail').length
+  const unverified = criteria.filter((item) => item.status === 'unverified').length
+
+  // Fail closed: a "ready" verdict contradicting its own criteria is refused.
+  // A proven failure means the work is not done; only missing evidence means we
+  // cannot tell yet, which is a different answer for the caller.
+  if (ruling === 'ready') {
+    if (hardFailures > 0 || blocking.length > 0) ruling = 'not_ready'
+    else if (unverified > 0) ruling = 'need_more_evidence'
+  }
+
+  return {
+    ruling,
+    summary: truncate(
+      (typeof record.summary === 'string' && record.summary.trim()) ||
+        (typeof record.reasoning === 'string' && record.reasoning.trim()) ||
+        (ruling === 'ready' ? '交付审核通过。' : '交付审核未通过。'),
+      2000,
+    ),
+    criteria,
+    blocking_issues: blocking,
+    required_actions: requiredActions,
+    reasoning: truncate(typeof record.reasoning === 'string' ? record.reasoning : '', 4000),
+    arbiter_model: modelLabel,
+    raw: truncate(rawText, 12000),
+  }
+}
+
+function errorBrief(message, modelLabel) {
+  return {
+    goal: truncate(message, 1200),
+    in_scope: [],
+    out_of_scope: [],
+    acceptance_criteria: [],
+    assumptions: [],
+    open_questions: [],
+    risks: [],
+    suggested_steps: [],
+    arbiter_model: modelLabel,
+    raw: '',
+  }
+}
+
+function errorFinalAudit(message, modelLabel) {
+  return {
+    ruling: 'error',
+    summary: truncate(message, 2000),
+    criteria: [],
+    blocking_issues: [],
+    required_actions: [],
+    reasoning: '',
+    arbiter_model: modelLabel,
+    raw: '',
+  }
+}
+
+function makeBriefTool(ctx, config, getRoutes) {
+  return {
+    name: 'cross_review_brief',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        requirement: {
+          type: 'string',
+          description: '用户的原始需求原文（自包含）。',
+        },
+        context: { type: 'string', description: '可选：补充上下文、已有约定、相关文件路径。' },
+        constraints: { type: 'string', description: '可选：已知约束（技术栈、时间、不可改动的部分）。' },
+      },
+      required: ['requirement'],
+    },
+    description:
+      '开工前的需求解析（由裁决者执行）：把用户原始需求整理成可执行、可验收的规格，明确范围、验收标准、假设和必须确认的问题。' +
+      '目的是让主代理一开始就理解正确，避免做完才发现方向错、返工重做。任务开始时调用一次即可，不要每步都调用。',
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          goal: { type: 'string' },
+          in_scope: { type: 'array', items: { type: 'string' } },
+          out_of_scope: { type: 'array', items: { type: 'string' } },
+          acceptance_criteria: { type: 'array', items: { type: 'string' } },
+          assumptions: { type: 'array', items: { type: 'string' } },
+          open_questions: { type: 'array', items: { type: 'string' } },
+          risks: { type: 'array', items: { type: 'string' } },
+          suggested_steps: { type: 'array', items: { type: 'string' } },
+          arbiter_model: { type: 'string' },
+          raw: { type: 'string' },
+        },
+        required: [
+          'goal',
+          'in_scope',
+          'out_of_scope',
+          'acceptance_criteria',
+          'assumptions',
+          'open_questions',
+          'risks',
+          'suggested_steps',
+          'arbiter_model',
+        ],
+      },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const routes = getRoutes()
+      const modelLabel = routeLabel(routes.arbiter)
+      try {
+        const prompt = buildBriefPrompt(args)
+        const { result } = await runChild(
+          ctx,
+          exec,
+          'cross-review-internal',
+          routes.arbiter,
+          prompt,
+          '需求解析',
+          config.reviewTimeoutMs,
+        )
+        const rawText = extractText(result)
+        if (result?.stopReason !== undefined && result.stopReason !== 'completed') {
+          return errorBrief(`需求解析未正常完成（stopReason=${result.stopReason}）`, modelLabel)
+        }
+        return normalizeBrief(parseJsonLoose(rawText), rawText, modelLabel)
+      } catch (error) {
+        return errorBrief(
+          `无法完成需求解析：${error instanceof Error ? error.message : String(error)}`,
+          modelLabel,
+        )
+      }
+    },
+  }
+}
+
+function makeFinalAuditTool(ctx, config, getRoutes) {
+  return {
+    name: 'cross_review_final',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        requirement: {
+          type: 'string',
+          description: '需求与验收标准原文（可粘贴 cross_review_brief 的 goal + acceptance_criteria）。',
+        },
+        claim: {
+          type: 'string',
+          description: '主代理的交付声明：声称完成了什么、改了哪些文件、跑了哪些验证。',
+        },
+        evidence: { type: 'string', description: '可选：命令输出、测试结果、文件路径等证据。' },
+        context: { type: 'string', description: '可选：补充上下文。' },
+      },
+      required: ['requirement', 'claim'],
+    },
+    description:
+      '交付前的终局审核（由裁决者执行）：逐条核对验收标准，自己验证文件与测试，识别"声称完成但实际没做"的情况。' +
+      '返回 ready 才可向用户宣布交付；not_ready 时按 required_actions 修完再审核。任务收尾调用一次，不要每步都调用。',
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ruling: {
+            type: 'string',
+            enum: ['ready', 'not_ready', 'need_more_evidence', 'error', 'unstructured'],
+          },
+          summary: { type: 'string' },
+          criteria: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                item: { type: 'string' },
+                status: { type: 'string', enum: ['pass', 'fail', 'unverified'] },
+                evidence: { type: 'string' },
+              },
+              required: ['item', 'status', 'evidence'],
+            },
+          },
+          blocking_issues: { type: 'array', items: { type: 'string' } },
+          required_actions: { type: 'array', items: { type: 'string' } },
+          reasoning: { type: 'string' },
+          arbiter_model: { type: 'string' },
+          raw: { type: 'string' },
+        },
+        required: ['ruling', 'summary', 'criteria', 'blocking_issues', 'required_actions', 'arbiter_model'],
+      },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const routes = getRoutes()
+      const modelLabel = routeLabel(routes.arbiter)
+      try {
+        const prompt = buildFinalAuditPrompt(args)
+        const { result } = await runChild(
+          ctx,
+          exec,
+          'cross-review-internal',
+          routes.arbiter,
+          prompt,
+          '交付审核',
+          config.reviewTimeoutMs,
+        )
+        const rawText = extractText(result)
+        if (result?.stopReason !== undefined && result.stopReason !== 'completed') {
+          return errorFinalAudit(`交付审核未正常完成（stopReason=${result.stopReason}）`, modelLabel)
+        }
+        return normalizeFinalAudit(parseJsonLoose(rawText), rawText, modelLabel)
+      } catch (error) {
+        return errorFinalAudit(
+          `无法完成交付审核：${error instanceof Error ? error.message : String(error)}`,
+          modelLabel,
+        )
+      }
+    },
+  }
+}
+
 function buildProtocol(routes) {
-  return `## 交叉复核模式协议（Cross-Verification Mode，强制）
+  return `## 交叉复核模式协议（Cross-Verification Mode）
 
-你是主代理（main agent），但你的结论默认不可信，直到经过独立的「复核者」审查。这个模式存在的目的，是防止模型把幻觉、遗漏、绕路、错误或未完成的验证当成“已完成”打勾。
+本模式有三个角色，分工固定：**裁决者做需求解析与交付审核，主代理干活，复核者做过程监督与引导。**
 
-### 必须调用 \`cross_review\` 的时机
-1. 形成或改变方案、架构、需求理解、任务拆分、范围与验收标准时。
-2. 执行任何会修改文件/配置/环境/仓库的命令之前：write、edit、apply_patch、bash/pwsh、安装依赖、git commit/push、部署、删除、移动等。
-3. 对用户或团队宣称“完成/通过/修复/已测试/没问题/已交付”之前。
-4. 调用 \`ask_user_question\` 之前：把每个问题、全部选项、推荐项与理由交给复核者。复核者可以质疑选项本身、补充选项之外的方案、指出伪二选一或遗漏的用户决策。
-5. 团队模式下，leader 的每个关键决策、分工、进度判断和最终答复。
+### 角色分工
+- **裁决者**（${routeLabel(routes.arbiter)}）：任务开始时解析需求，任务结束时审核交付。只在首尾各调用一次。
+- **主代理**（你）：按解析出的规格执行，过程中保持自检。
+- **复核者**（${routeLabel(routes.reviewer)}）：过程中给方向、盯风险，不替你做决定。
 
-### 调用方式
-\`cross_review\` 会新开一个独立复核子代理（默认模型：${routeLabel(routes.reviewer)}）。它看不到你的对话，所以 subject 必须自包含：目标、当前方案/命令原文、相关文件路径、已运行过的验证、你的依据。只读检索可以合并审查，但每个写操作/危险命令/用户问题/交付声明必须单独审查。
+### 任务开始时：调用 \`cross_review_brief\`（一次）
+把用户原始需求交给裁决者，得到 goal / 范围 / 验收标准 / 假设 / 待确认问题。
+若 open_questions 里有必须用户决定的事项，先用 ask_user_question 问清楚再开工；其余按 assumptions 推进并在最终回复里说明。
 
-### 共识与裁决规则
-- \`consensus\`：可以继续。仍需按复核者提出的非阻塞建议调整。
-- \`objection\`：不得继续。按 \`required_fixes\` 修改后，对同一 subject 重新调用 \`cross_review\`，同一事项最多 3 轮。
-- 3 轮后仍 \`objection\`，或涉及安全、不可逆、重大范围分歧：调用 \`cross_review_arbitrate\`，提交主代理立场与复核者意见。裁决由 ${routeLabel(routes.arbiter)} 作出，具有约束力，必须执行 \`required_actions\`。
-- \`error\` 或 \`unstructured\`：视为未达成共识；补齐信息后重试，绝不能当作通过。
+### 执行过程中：按需调用 \`cross_review\`（监督 + 引导）
+触发时机（不需要每步都调，挑真正有判断成本的节点）：
+1. 方案定稿、架构选择、需求理解出现分歧时。
+2. 要执行不可逆或影响面大的操作之前：删除、覆盖、批量改写、git push、安装依赖、部署。
+3. 连续两次尝试都没解决问题时——此时更需要方向而不是再审一遍。
 
-### 团队模式（Agent Teams）
-- 团队任务开始时，Lead 必须创建一个名为 \`leader1\` 的常驻复核队友。leader1 只做质疑与验收，不执行主任务，对 Lead 的决策、分工、进度和最终答复提出反对意见。
-- 每个职能队友对应一个复核角色：需求分析→需求质疑者；前端开发→前端体验质疑者（重点：美观、简洁、一致性、可访问性、响应式、交互细节）；后端开发→后端健壮性/安全性质疑者；测试→测试有效性质疑者（覆盖、边界、假阳性）；文档→文档准确性质疑者；交付→交付验收质疑者。
-- 队友提交交付物前必须调用 \`cross_review\`（或由 Lead 为其创建对应 reviewer 队友）。复核者只读、可联网、可运行只读验证命令，不得修改交付物。
-- 任何成员不得用“已打勾”代替证据；没有交叉复核记录的完成声明无效。
+复核者返回三种结论：
+- \`consensus\`：按它的 guidance 优化后继续。
+- \`proceed_with_caution\`：**可以继续**，但必须把 watchpoints 当成执行时的检查清单。
+- \`objection\`：只在会导致返工/损坏/安全问题时出现，按 required_fixes 修完再继续，同一事项最多 3 轮；仍不通过再调 \`cross_review_arbitrate\`。
+
+读结果时优先看 **guidance 和 focus_next**——那是复核者给你的方向，比挑错更有价值。
+
+### 任务结束时：调用 \`cross_review_final\`（一次）
+把需求验收标准和你的交付声明交给裁决者，它会自己核对文件与测试。
+- \`ready\`：才可以向用户宣布交付。
+- \`not_ready\` / \`need_more_evidence\`：按 required_actions 修完再审核，不要跳过直接报告完成。
 
 ### 行为准则
 - 先证据后结论；不确定就说不确定并补验证。
-- 不允许绕过审查：不得把写操作拆成更小命令来规避，不得以“只是小改动”跳过。
-- 审查后必须显式记录本步结论（通过/修改/裁决）再继续。`
+- 不允许绕过：不得把写操作拆成更小命令规避审查，不得以"只是小改动"跳过关键节点。
+- 不要把复核者的每条建议都当成阻塞项；只有 objection 才阻塞。
+- 最终回复里要写清：做了什么、验证了什么、还有哪些未验证或已知限制。`
 }
 
 function liveRoutes(ctx, config) {
@@ -709,8 +1058,10 @@ export function apply(ctx, config = {}) {
       Number.isFinite(config?.reviewTimeoutMs) && config.reviewTimeoutMs > 0 ? config.reviewTimeoutMs : 180000,
   }
   const getRoutes = () => liveRoutes(ctx, config)
+  ctx.tools.register(makeBriefTool(ctx, policy, getRoutes))
   ctx.tools.register(makeReviewTool(ctx, policy, getRoutes))
   ctx.tools.register(makeArbitrateTool(ctx, policy, getRoutes))
+  ctx.tools.register(makeFinalAuditTool(ctx, policy, getRoutes))
   installGuard(ctx, policy)
   ctx.systemPrompt.section({
     name: 'cross-review:protocol',
@@ -725,8 +1076,12 @@ export {
   DEFAULT_ARBITER,
   buildReviewPrompt,
   buildArbitrationPrompt,
+  buildBriefPrompt,
+  buildFinalAuditPrompt,
   normalizeReview,
   normalizeArbitration,
+  normalizeBrief,
+  normalizeFinalAudit,
   parseJsonLoose,
   routeOf,
 }
