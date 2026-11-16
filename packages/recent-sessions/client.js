@@ -114,6 +114,7 @@ window.__ModuleLoader__.load({
       '.rsx-btn{height:30px;padding:0 12px;border-radius:7px;border:0.5px solid var(--dsw-alias-border-l1);background:transparent;color:var(--dsw-alias-label-primary);cursor:pointer;font-size:13px}',
       '.rsx-btn.primary{background:var(--dsw-alias-brand-primary);border-color:transparent;color:#fff}',
       '.rsx-btn:disabled{opacity:.5;cursor:default}',
+      '[data-sidebar-workspace-header]{position:sticky;top:0;z-index:6;background:var(--dsw-specific-sidebar-fill,var(--dsw-alias-bg-base))}',
     ].join('');
 
     function Chevron({ open }) {
@@ -306,19 +307,26 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Locate the sidebar shell's workspace region. The current shell marks the
-     * workspace header with data-sidebar-workspace-header and the sidebar
-     * scrollport with data-sidebar-scrollport; older builds nested the region
-     * after a panel-list nav. Support both.
+     * Locate the sidebar parts used to reserve a slot for this section.
+     * Current shell: header[data-sidebar-workspace-header] inside
+     * scrollArea[data-sidebar-scrollport] inside scrollRegion — reserve on
+     * scrollRegion so the whole scrollArea (panel nav + workspace) moves below
+     * the section and can never scroll over it.
+     * Older shell: regionArea right after a panel-list nav.
      */
-    function findWorkspaceRegion() {
+    function findWorkspaceParts() {
       const header = document.querySelector('[data-sidebar-workspace-header]');
       if (header) {
+        let scrollArea = header;
+        while (scrollArea && !scrollArea.hasAttribute('data-sidebar-scrollport')) scrollArea = scrollArea.parentElement;
+        if (scrollArea && scrollArea.parentElement) {
+          return { anchor: scrollArea.parentElement, measure: scrollArea };
+        }
         let region = header.parentElement;
         while (region && region.parentElement && !region.parentElement.hasAttribute('data-sidebar-scrollport')) {
           region = region.parentElement;
         }
-        if (region) return region;
+        if (region) return { anchor: region, measure: region };
       }
       const toggle = document.querySelector('[data-sidebar-toggle]');
       if (toggle) {
@@ -328,31 +336,31 @@ window.__ModuleLoader__.load({
         }
         if (root) {
           const nav = root.querySelector(':scope > nav');
-          if (nav && nav.nextElementSibling) return nav.nextElementSibling;
+          if (nav && nav.nextElementSibling) return { anchor: nav.nextElementSibling, measure: nav.nextElementSibling };
         }
       }
       return null;
     }
 
     /**
-     * Reserve vertical space at the top of the workspace region so the
-     * "工作区" browser is pushed down instead of being covered.
+     * Reserve vertical space outside the sidebar scroller so the workspace area
+     * is pushed below this section (instead of scrolling underneath it).
      */
     function reserveSpace(height) {
-      const region = findWorkspaceRegion();
-      if (!region) return null;
+      const parts = findWorkspaceParts();
+      if (!parts) return null;
+      const anchor = parts.anchor;
+      const measure = parts.measure;
       const pad = height + 'px';
-      if (region.style.paddingTop !== pad) region.style.paddingTop = pad;
-      if (region.style.boxSizing !== 'border-box') region.style.boxSizing = 'border-box';
-      const rect = region.getBoundingClientRect();
-      if (rect.width < 100 || rect.height < 40) return { region, rect: null };
-      // Keep the panel inside the sidebar scroll viewport: at rest it sits in its
-      // reserved slot; when workspace search scrolls the content, clamp it to the
-      // viewport top so it never runs above the brand/New Session rows.
-      const scrollport = region.parentElement && region.parentElement.hasAttribute('data-sidebar-scrollport') ? region.parentElement : null;
-      const scrollRect = scrollport ? scrollport.getBoundingClientRect() : null;
-      const top = scrollRect ? Math.max(rect.top, scrollRect.top) : rect.top;
-      return { region, rect: { top, left: rect.left, width: rect.width } };
+      if (anchor.style.paddingTop !== pad) anchor.style.paddingTop = pad;
+      if (anchor.style.boxSizing !== 'border-box') anchor.style.boxSizing = 'border-box';
+      const anchorRect = anchor.getBoundingClientRect();
+      const measureRect = measure.getBoundingClientRect();
+      if (measureRect.width < 100 || anchorRect.height < 40) return { region: anchor, rect: null };
+      return {
+        region: anchor,
+        rect: { top: anchorRect.top, left: measureRect.left, width: measureRect.width, clipTop: 0, clipBottom: 0 },
+      };
     }
 
     /**
@@ -498,7 +506,7 @@ window.__ModuleLoader__.load({
             scrollport.addEventListener('scroll', onScroll, { passive: true });
           }
           const next = result.rect;
-          setRect((prev) => (prev && next && prev.top === next.top && prev.left === next.left && prev.width === next.width ? prev : next));
+          setRect((prev) => (prev && next && prev.top === next.top && prev.left === next.left && prev.width === next.width && prev.clipTop === next.clipTop && prev.clipBottom === next.clipBottom ? prev : next));
           if (observer == null && typeof ResizeObserver !== 'undefined') {
             observer = new ResizeObserver(measure);
             if (region.parentElement) observer.observe(region.parentElement);
@@ -659,7 +667,12 @@ window.__ModuleLoader__.load({
 
       const style = rect == null
         ? { display: 'none' }
-        : { top: rect.top + 'px', left: rect.left + 'px', width: rect.width + 'px' };
+        : {
+            top: rect.top + 'px',
+            left: rect.left + 'px',
+            width: rect.width + 'px',
+            ...(rect.clipTop || rect.clipBottom ? { clipPath: `inset(${rect.clipTop}px 0 ${rect.clipBottom}px 0)` } : {}),
+          };
 
       return h('div', { className: 'rsx-root', style },
         h('style', { key: 'rsx-style' }, CSS),
