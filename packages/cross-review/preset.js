@@ -349,7 +349,7 @@ function buildReviewPrompt(args) {
   const options = Array.isArray(args.options) ? args.options.filter((item) => typeof item === 'string') : []
   return `你是「复核者」（supervisor）。你在过程中的角色是**监督 + 引导**，不是拦路审批。
 
-主代理当前所处的步骤或决定（只以这段材料为准，你看不到主代理的对话）：
+主代理当前所处的步骤或决定（下面是显式材料与系统自动附带的主会话摘要；你看不到主代理的实时对话）：
 ---BEGIN SUBJECT---
 ${args.subject}
 ---END SUBJECT---
@@ -359,6 +359,7 @@ ${checklistFor(category, args.role)}
 ${options.length > 0 ? `\n主代理准备让用户选择的选项（请检查选项本身是否成立，并补充选项之外的替代方案）：\n${bulletList(options)}` : ''}
 ${args.context ? `\n主代理补充的上下文：\n${args.context}` : ''}
 ${args.evidence ? `\n主代理声称已经完成的验证：\n${args.evidence}` : ''}
+${renderFiles(args.files)}
 
 你的职责分三层，按重要性排序：
 1. **引导（guidance）**：告诉主代理下一步最该做什么、最省力的正确路径是什么、有哪些现成的东西可以直接用而不必重造。这是你最有价值的输出。
@@ -405,13 +406,14 @@ ${args.evidence ? `已有证据：\n${args.evidence}\n` : ''}
 function buildBriefPrompt(args) {
   return `你是「裁决者」（arbiter），本次担任**需求解析**。主代理还没开工，你先把需求整理成可执行、可验收的规格，避免主代理理解偏差后返工。
 
-用户原始需求（只以这段材料为准，你看不到用户与主代理的对话）：
+用户原始需求（下面是显式材料与系统自动附带的主会话摘要；你看不到主代理的实时对话）：
 ---BEGIN SUBJECT---
 ${args.requirement}
 ---END SUBJECT---
 
 ${args.context ? `补充上下文：\n${args.context}\n` : ''}
 ${args.constraints ? `已知约束：\n${args.constraints}\n` : ''}
+${renderFiles(args.files)}
 工作要求：
 1. 用 read/glob/grep 查看工作区真实现状，把需求落到具体文件/模块上；不要凭空假设。
 2. 只做需求解析，不要开始实现，不要修改任何文件。
@@ -433,6 +435,7 @@ ${args.requirement}
 ${args.claim}
 
 ${args.evidence ? `主代理提供的证据：\n${args.evidence}\n` : ''}
+${renderFiles(args.files)}
 ${args.context ? `补充上下文：\n${args.context}\n` : ''}
 审核规则：
 1. **必须自己验证**，不要相信主代理的声明。用 read/glob/grep 检查真实文件；只读命令或测试可以跑；不要修改任何文件。
@@ -441,6 +444,81 @@ ${args.context ? `补充上下文：\n${args.context}\n` : ''}
 4. 只要有任何一条验收标准 fail 或关键项 unverified，就返回 not_ready。
 5. 最后只输出一个 JSON 对象，不要 Markdown 代码围栏，不要 JSON 之外的文字：
 {"ruling":"ready|not_ready|need_more_evidence","summary":"一句话结论","criteria":[{"item":"验收标准原文","status":"pass|fail|unverified","evidence":"你验证了什么"}],"blocking_issues":["必须修完才能交付的"],"required_actions":["主代理接下来必须做的"],"reasoning":"审核理由"}`
+}
+
+function renderFiles(files) {
+  const list = toStrArray(files)
+  if (list.length === 0) return ''
+  return `相关文件/目录（请用 read/glob/grep 自行核对，不要凭空假设）：\n${list.map((item) => `- ${item}`).join('\n')}\n`
+}
+
+async function collectSessionContext(ctx, exec) {
+  const parts = []
+  let cwd = ''
+  try {
+    const wd = ctx.get('workingDirectory')
+    const session = exec?.agent?.session
+    if (wd !== undefined && typeof wd.get === 'function' && session !== undefined) {
+      const dir = wd.get(session)
+      if (typeof dir === 'string' && dir.length > 0) cwd = dir
+    }
+    if (cwd === '' && typeof session?.header?.cwd === 'string' && session.header.cwd.length > 0) {
+      cwd = session.header.cwd
+    }
+  } catch {
+    // working directory is best effort
+  }
+  if (cwd !== '') parts.push(`工作目录：${cwd}`)
+  try {
+    const query = ctx.get('sessionQuery')
+    const sessionId = exec?.agent?.session?.id
+    if (
+      query !== undefined &&
+      typeof query.inspectSession === 'function' &&
+      typeof sessionId === 'string' &&
+      sessionId.length > 0
+    ) {
+      const messages = await query.inspectSession(sessionId, (session) =>
+        session.deriveMessages().map((message) => ({
+          role: message.role,
+          text: Array.isArray(message.content)
+            ? message.content
+                .map((block) => {
+                  if (block === null || typeof block !== 'object') return ''
+                  if (block.type === 'image') {
+                    const name = block.attachment && block.attachment.name ? `：${block.attachment.name}` : ''
+                    return `[图片${name}]`
+                  }
+                  if (block.type === 'file') {
+                    const name = block.attachment && block.attachment.name ? `：${block.attachment.name}` : ''
+                    return `[附件${name}]`
+                  }
+                  if (typeof block.text === 'string') return block.text
+                  return ''
+                })
+                .filter((text) => text.length > 0)
+                .join('\n')
+            : '',
+        })),
+      )
+      const relevant = (Array.isArray(messages) ? messages : [])
+        .filter(
+          (message) =>
+            (message.role === 'user' || message.role === 'assistant') &&
+            typeof message.text === 'string' &&
+            message.text.trim().length > 0,
+        )
+        .slice(-6)
+      if (relevant.length > 0) {
+        const digest = relevant.map((message) => `[${message.role}] ${truncate(message.text, 1200)}`).join('\n\n')
+        parts.push(`最近对话（自动摘要，可能已截断；请以工作区真实文件为准）：\n${digest}`)
+      }
+    }
+  } catch {
+    // conversation digest is best effort
+  }
+  if (parts.length === 0) return ''
+  return `\n\n===== 主会话自动上下文（系统只读附带；用于定位资源，最终以你实际读到的文件为准）=====\n${parts.join('\n\n')}\n===== 自动上下文结束 =====`
 }
 
 function abortError(signal) {
@@ -471,10 +549,16 @@ async function runChild(ctx, exec, preset, route, prompt, label, timeoutMs) {
     ...(typeof route?.model === 'string' ? { model: route.model } : {}),
     ...(typeof route?.reasoningEffort === 'string' ? { reasoningEffort: route.reasoningEffort } : {}),
   }
+  let promptWithContext = prompt
+  try {
+    promptWithContext = `${prompt}${await collectSessionContext(ctx, exec)}`
+  } catch {
+    promptWithContext = prompt
+  }
   const activation = await subagents.startActivation({
     provider: 'spawn',
     label,
-    prompt: [{ type: 'text', text: prompt }],
+    prompt: [{ type: 'text', text: promptWithContext }],
     parent: exec.agent,
     agentPreset: preset,
     agentOptions: childAgentOptions,
@@ -573,7 +657,7 @@ function makeReviewTool(ctx, config, getRoutes) {
       '交叉复核模式的核心工具：把当前步骤/决策/命令/交付物/用户问题交给一个独立的「复核者」子代理审查。' +
       '复核者使用独立模型（默认 Hy4.WorkBuddy），可联网搜索、读取文件并运行只读验证；它看不到本会话，所以 subject 必须自包含。' +
       '返回 verdict=consensus 才可继续；objection 时按 required_fixes 修改后复审；error/unstructured 视为未通过。' +
-      '每个写操作、危险命令、用户提问和完成声明都必须先审核。',
+      '每个写操作、危险命令、用户提问和完成声明都必须先审核。请把涉及的工作区文件/目录路径填进 files。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -603,6 +687,11 @@ function makeReviewTool(ctx, config, getRoutes) {
         evidence: {
           type: 'string',
           description: '可选：主代理已经完成的验证（命令、测试、阅读、URL）。',
+        },
+        files: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '本次审查涉及的工作区文件/目录路径。子代理看不到你的实时对话，会按这些路径用 read/glob/grep 自行核对；强烈建议填写。',
         },
         target_tools: {
           type: 'array',
@@ -934,12 +1023,17 @@ function makeBriefTool(ctx, config, getRoutes) {
         },
         context: { type: 'string', description: '可选：补充上下文、已有约定、相关文件路径。' },
         constraints: { type: 'string', description: '可选：已知约束（技术栈、时间、不可改动的部分）。' },
+        files: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '本轮涉及的工作区文件/目录路径（相对或绝对均可）。子代理看不到你的实时对话，会按这些路径用 read/glob/grep 自行核对；强烈建议填写用户 @ 引用的文件、待改文件和相关模块。',
+        },
       },
       required: ['requirement'],
     },
     description:
       '开工前的需求解析（由裁决者执行）：把用户原始需求整理成可执行、可验收的规格，明确范围、验收标准、假设和必须确认的问题。' +
-      '目的是让主代理一开始就理解正确，避免做完才发现方向错、返工重做。任务开始时调用一次即可，不要每步都调用。',
+      '目的是让主代理一开始就理解正确，避免做完才发现方向错、返工重做。任务开始时调用一次即可，不要每步都调用。请把相关工作区文件/目录路径填进 files，子代理会自行核对。',
     output: {
       schema: {
         type: 'object',
@@ -1036,12 +1130,17 @@ function makeFinalAuditTool(ctx, config, getRoutes) {
         },
         evidence: { type: 'string', description: '可选：命令输出、测试结果、文件路径等证据。' },
         context: { type: 'string', description: '可选：补充上下文。' },
+        files: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '交付审核涉及的工作区文件/目录路径。子代理会按这些路径用 read/glob/grep 自行核对；强烈建议填写改动文件与测试相关文件。',
+        },
       },
       required: ['requirement', 'claim'],
     },
     description:
       '交付前的终局审核（由裁决者执行）：逐条核对验收标准，自己验证文件与测试，识别"声称完成但实际没做"的情况。' +
-      '返回 ready 才可向用户宣布交付；not_ready 时按 required_actions 修完再审核。任务收尾调用一次，不要每步都调用。',
+      '返回 ready 才可向用户宣布交付；not_ready 时按 required_actions 修完再审核。任务收尾调用一次，不要每步都调用。请把改动文件与测试相关文件路径填进 files。',
     output: {
       schema: {
         type: 'object',
@@ -1122,54 +1221,39 @@ function makeFinalAuditTool(ctx, config, getRoutes) {
 }
 
 function buildProtocol(routes) {
-  const reviewerOff = routes.reviewer.enabled === false
   const arbiterOff = routes.arbiter.enabled === false
   const briefOff = !arbiterOff && routes.arbiter.briefEnabled === false
   const auditOff = !arbiterOff && routes.arbiter.auditEnabled === false
   const statusLines = [
-    reviewerOff ? '- 复核者：**当前已在设置中停用**，`cross_review` 会直接放行且不启动子代理。' : null,
     arbiterOff
-      ? '- 裁决者：**当前已在设置中停用**，`cross_review_brief` / `cross_review_final` / `cross_review_arbitrate` 会直接放行。'
+      ? '- 裁决者：**当前已在设置中停用**，cross_review_brief / cross_review_final 会直接放行。'
       : null,
-    briefOff ? '- 裁决者·需求解析：**当前已在设置中关闭**，`cross_review_brief` 会直接放行，按你自己的理解开工。' : null,
-    auditOff ? '- 裁决者·交付审核：**当前已在设置中关闭**，`cross_review_final` 会直接放行，交付前请自行逐条核对验收标准。' : null,
+    briefOff ? '- 裁决者·需求解析：**当前已在设置中关闭**，cross_review_brief 会直接放行，按你自己的理解开工。' : null,
+    auditOff ? '- 裁决者·交付审核：**当前已在设置中关闭**，cross_review_final 会直接放行，交付前请自行逐条核对验收标准。' : null,
   ].filter((line) => line !== null)
+  const statusSection = statusLines.length > 0 ? '\n### 当前生效状态\n' + statusLines.join('\n') + '\n' : ''
 
   return `## 交叉复核模式协议（Cross-Verification Mode）
 
-本模式有三个角色，分工固定：**裁决者做需求解析与交付审核，主代理干活，复核者做过程监督与引导。**
+本模式有两个角色：**裁决者负责开工前解析需求、收尾时审核交付；你（主代理）负责执行与取证。**
 
 ### 角色分工
 - **裁决者**（${routeLabel(routes.arbiter)}）：任务开始时解析需求，任务结束时审核交付。只在首尾各调用一次。
-- **主代理**（你）：按解析出的规格执行，过程中保持自检。
-- **复核者**（${routeLabel(routes.reviewer)}）：过程中给方向、盯风险，不替你做决定。
-${statusLines.length > 0 ? `\n### 当前生效状态\n${statusLines.join('\n')}\n` : ''}
-### 任务开始时：调用 \`cross_review_brief\`（一次）
+- **主代理**（你）：按解析出的规格执行，并负责产出**可复现证据**（命令、输出、文件路径）；**验收判定由裁决者完成，你自己不另做一遍验收、也不自行下「通过/不通过」的结论**。
+${statusSection}
+### 任务开始时：调用 cross_review_brief（一次）
 把用户原始需求交给裁决者，得到 goal / 范围 / 验收标准 / 假设 / 待确认问题。
 若 open_questions 里有必须用户决定的事项，先用 ask_user_question 问清楚再开工；其余按 assumptions 推进并在最终回复里说明。
 
-### 执行过程中：按需调用 \`cross_review\`（监督 + 引导）
-触发时机（不需要每步都调，挑真正有判断成本的节点）：
-1. 方案定稿、架构选择、需求理解出现分歧时。
-2. 要执行不可逆或影响面大的操作之前：删除、覆盖、批量改写、git push、安装依赖、部署。
-3. 连续两次尝试都没解决问题时——此时更需要方向而不是再审一遍。
-
-复核者返回三种结论：
-- \`consensus\`：按它的 guidance 优化后继续。
-- \`proceed_with_caution\`：**可以继续**，但必须把 watchpoints 当成执行时的检查清单。
-- \`objection\`：只在会导致返工/损坏/安全问题时出现，按 required_fixes 修完再继续，同一事项最多 3 轮；仍不通过再调 \`cross_review_arbitrate\`。
-
-读结果时优先看 **guidance 和 focus_next**——那是复核者给你的方向，比挑错更有价值。
-
-### 任务结束时：调用 \`cross_review_final\`（一次）
-把需求验收标准和你的交付声明交给裁决者，它会自己核对文件与测试。
-- \`ready\`：才可以向用户宣布交付。
-- \`not_ready\` / \`need_more_evidence\`：按 required_actions 修完再审核，不要跳过直接报告完成。
+### 任务结束时：调用 cross_review_final（一次）——唯一的验收关
+这是唯一的验收关，由裁决者判定：把验收标准、你的交付声明、以及**可复现证据**（改了哪些文件、跑了什么命令、关键输出）交给裁决者，它会自己核对文件与测试；你只负责提供证据，不自行下验收结论。
+- ready：才可以向用户宣布交付。
+- not_ready / need_more_evidence：按 required_actions 修完再审核，不要跳过直接报告完成。
 
 ### 行为准则
-- 先证据后结论；不确定就说不确定并补验证。
-- 不允许绕过：不得把写操作拆成更小命令规避审查，不得以"只是小改动"跳过关键节点。
-- 不要把复核者的每条建议都当成阻塞项；只有 objection 才阻塞。
+- 先证据后结论；不确定就说不确定并补验证。验收判定交给裁决者，你只提供可复现证据（命令 + 输出 + 文件路径），不自行下验收结论。
+- 调用 cross_review_brief / cross_review_final 时，务必把涉及的工作区文件/目录路径填进 files，把工作目录、附件说明和会话背景填进 context。子代理看不到你的实时对话，只能用你给的材料和系统自动附带的会话摘要；关键资源一定要显式给路径，让它自己用 read/glob/grep 核对。
+- 不要以「只是小改动」跳过交付前的 cross_review_final 审核。
 - 最终回复里要写清：做了什么、验证了什么、还有哪些未验证或已知限制。`
 }
 
@@ -1192,10 +1276,7 @@ export function apply(ctx, config = {}) {
   }
   const getRoutes = () => liveRoutes(ctx, config)
   ctx.tools.register(makeBriefTool(ctx, policy, getRoutes))
-  ctx.tools.register(makeReviewTool(ctx, policy, getRoutes))
-  ctx.tools.register(makeArbitrateTool(ctx, policy, getRoutes))
   ctx.tools.register(makeFinalAuditTool(ctx, policy, getRoutes))
-  installGuard(ctx, policy)
   ctx.systemPrompt.section({
     name: 'cross-review:protocol',
     order: 150,

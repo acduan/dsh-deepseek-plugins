@@ -280,7 +280,6 @@ window.__ModuleLoader__.load({
         setStatus(null)
         try {
           const payload = {
-            reviewer: toRoutePayload(draft.reviewer),
             arbiter: toRoutePayload(draft.arbiter),
           }
           const response = await fetch('/api/cross-review-config', {
@@ -310,23 +309,15 @@ window.__ModuleLoader__.load({
         h('style', null, CSS),
         h('div', { className: 'rbm-header' },
           h('h1', { className: 'rbm-title' }, '交叉复核模式'),
-          h('p', { className: 'rbm-sub' }, '配置复核者与裁决者的启用状态、模型和超时时长。模型选项来自当前 DSH 已配置且注册的 LLM providers，保存后立即作用于后续调用。')),
+          h('p', { className: 'rbm-sub' }, '配置裁决者的启用状态、模型和超时时长。模型选项来自当前 DSH 已配置且注册的 LLM providers，保存后立即作用于后续调用。')),
         loading ? h('div', { className: 'rbm-empty' }, '正在读取当前可用模型…') : null,
         error ? h('div', { className: 'rbm-status rbm-status-error' }, '读取失败：' + error) : null,
         !loading && error ? h('div', { className: 'rbm-footer' }, h('button', { className: 'rbm-btn', onClick: load }, '重试')) : null,
         !loading && !error && draft !== null ? h(React.Fragment, null,
           h(RouteCard, {
-            title: '复核者（cross_review）',
-            description: '过程监督 + 引导：给方向、盯风险，只在会导致返工或损坏时拦截。默认 Hy4 · WorkBuddy。',
-            disabledNote: '复核者已停用：cross_review 将直接放行，不再启动子代理。',
-            route: draft.reviewer,
-            groups,
-            onChange: (field, value) => onChange('reviewer', field, value),
-          }),
-          h(RouteCard, {
-            title: '裁决者（brief / final / arbitrate）',
-            description: '开工前解析需求、收尾时审核交付、争议时裁决。默认 GPT-6.1 Sol · PackyCode1。',
-            disabledNote: '裁决者已停用：需求解析、交付审核与争议裁决将直接放行，不再启动子代理。',
+            title: '裁决者（brief / final）',
+            description: '开工前解析需求、收尾时审核交付。默认 GPT-6.1 Sol · PackyCode1。',
+            disabledNote: '裁决者已停用：需求解析与交付审核将直接放行，不再启动子代理。',
             duties: [
               { field: 'briefEnabled', label: '需求解析', hint: '开工前整理规格与验收标准（cross_review_brief）' },
               { field: 'auditEnabled', label: '交付审核', hint: '收尾时逐条核对验收标准（cross_review_final）' },

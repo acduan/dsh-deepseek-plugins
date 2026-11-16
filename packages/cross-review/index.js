@@ -262,7 +262,7 @@ export async function apply(ctx, config = {}) {
         }
         try {
           const next = {
-            reviewer: await validateRoute(ctx, body.reviewer ?? currentConfig.reviewer, 'reviewer'),
+            reviewer: body.reviewer === undefined ? currentConfig.reviewer : await validateRoute(ctx, body.reviewer, 'reviewer'),
             arbiter: await validateRoute(ctx, body.arbiter ?? currentConfig.arbiter, 'arbiter'),
           }
           if (table !== undefined) await table.put('config', next)
