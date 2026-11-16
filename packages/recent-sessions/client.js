@@ -346,7 +346,13 @@ window.__ModuleLoader__.load({
       if (region.style.boxSizing !== 'border-box') region.style.boxSizing = 'border-box';
       const rect = region.getBoundingClientRect();
       if (rect.width < 100 || rect.height < 40) return { region, rect: null };
-      return { region, rect };
+      // Keep the panel inside the sidebar scroll viewport: at rest it sits in its
+      // reserved slot; when workspace search scrolls the content, clamp it to the
+      // viewport top so it never runs above the brand/New Session rows.
+      const scrollport = region.parentElement && region.parentElement.hasAttribute('data-sidebar-scrollport') ? region.parentElement : null;
+      const scrollRect = scrollport ? scrollport.getBoundingClientRect() : null;
+      const top = scrollRect ? Math.max(rect.top, scrollRect.top) : rect.top;
+      return { region, rect: { top, left: rect.left, width: rect.width } };
     }
 
     /**
