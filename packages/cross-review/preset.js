@@ -30,6 +30,9 @@ const DEFAULT_ARBITER = {
   provider: 'magpie-responses',
   model: 'packycode1/gpt-6.1-sol',
   reasoningEffort: 'high',
+  // Both duties default to on; the settings page can switch each one off.
+  briefEnabled: true,
+  auditEnabled: true,
 }
 
 const REVIEW_TTL_MS = 20 * 60 * 1000
@@ -77,8 +80,14 @@ function routeOf(value, fallback) {
   const enabled = typeof candidate.enabled === 'boolean' ? candidate.enabled : fallback.enabled !== false
   const timeoutMs =
     Number.isFinite(candidate.timeoutMs) && candidate.timeoutMs > 0 ? candidate.timeoutMs : fallback.timeoutMs
+  // The arbiter owns two optional duties; each is switched independently so a
+  // user can keep only the requirement briefing, for example.
+  const hasDuties = fallback.briefEnabled !== undefined || fallback.auditEnabled !== undefined
+  const duty = (key) =>
+    typeof candidate[key] === 'boolean' ? candidate[key] : fallback[key] !== false
   return {
     enabled,
+    ...(hasDuties ? { briefEnabled: duty('briefEnabled'), auditEnabled: duty('auditEnabled') } : {}),
     provider,
     model,
     ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
@@ -955,9 +964,14 @@ function makeBriefTool(ctx, config, getRoutes) {
     async execute(args, exec) {
       const routes = getRoutes()
       const modelLabel = routeLabel(routes.arbiter)
-      if (routes.arbiter.enabled === false) {
+      // Requirement briefing can be switched off on its own, leaving the closing
+      // audit enabled (or the reverse).
+      if (routes.arbiter.enabled === false || routes.arbiter.briefEnabled === false) {
         return {
-          goal: '裁决者已在设置中停用，跳过需求解析（未启动子代理）。',
+          goal:
+            routes.arbiter.enabled === false
+              ? '裁决者已在设置中停用，跳过需求解析（未启动子代理）。'
+              : '需求解析已在设置中关闭，跳过（未启动子代理）。',
           in_scope: [],
           out_of_scope: [],
           acceptance_criteria: [],
@@ -1055,10 +1069,14 @@ function makeFinalAuditTool(ctx, config, getRoutes) {
     async execute(args, exec) {
       const routes = getRoutes()
       const modelLabel = routeLabel(routes.arbiter)
-      if (routes.arbiter.enabled === false) {
+      // Closing audit can be switched off on its own.
+      if (routes.arbiter.enabled === false || routes.arbiter.auditEnabled === false) {
         return {
           ruling: 'ready',
-          summary: '裁决者已在设置中停用，跳过交付审核（未启动子代理）。',
+          summary:
+            routes.arbiter.enabled === false
+              ? '裁决者已在设置中停用，跳过交付审核（未启动子代理）。'
+              : '交付审核已在设置中关闭，跳过（未启动子代理）。',
           criteria: [],
           blocking_issues: [],
           required_actions: [],
@@ -1096,11 +1114,15 @@ function makeFinalAuditTool(ctx, config, getRoutes) {
 function buildProtocol(routes) {
   const reviewerOff = routes.reviewer.enabled === false
   const arbiterOff = routes.arbiter.enabled === false
+  const briefOff = !arbiterOff && routes.arbiter.briefEnabled === false
+  const auditOff = !arbiterOff && routes.arbiter.auditEnabled === false
   const statusLines = [
     reviewerOff ? '- 复核者：**当前已在设置中停用**，`cross_review` 会直接放行且不启动子代理。' : null,
     arbiterOff
       ? '- 裁决者：**当前已在设置中停用**，`cross_review_brief` / `cross_review_final` / `cross_review_arbitrate` 会直接放行。'
       : null,
+    briefOff ? '- 裁决者·需求解析：**当前已在设置中关闭**，`cross_review_brief` 会直接放行，按你自己的理解开工。' : null,
+    auditOff ? '- 裁决者·交付审核：**当前已在设置中关闭**，`cross_review_final` 会直接放行，交付前请自行逐条核对验收标准。' : null,
   ].filter((line) => line !== null)
 
   return `## 交叉复核模式协议（Cross-Verification Mode）

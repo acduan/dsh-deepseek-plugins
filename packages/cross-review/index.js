@@ -29,6 +29,11 @@ export const DEFAULT_CONFIG = Object.freeze({
   }),
   arbiter: Object.freeze({
     enabled: true,
+    // The arbiter serves three separate duties; each can be switched off
+    // independently so a user can keep, for example, only the requirement
+    // briefing without paying for the closing audit.
+    briefEnabled: true,
+    auditEnabled: true,
     provider: 'magpie-responses',
     model: 'packycode1/gpt-6.1-sol',
     reasoningEffort: 'high',
@@ -86,8 +91,17 @@ function normalizeRoute(route, fallback) {
   // explicit value always wins and omission inherits the deployment default.
   const enabled = typeof candidate.enabled === 'boolean' ? candidate.enabled : fallback.enabled
   const timeoutMs = normalizeTimeout(candidate.timeoutMs, fallback.timeoutMs)
+  // The arbiter's two duties are optional independently of the role switch.
+  // Routes without these keys (the reviewer) simply do not carry them.
+  const duty = (key) =>
+    typeof candidate[key] === 'boolean' ? candidate[key] : fallback[key] !== false
+  const duties =
+    fallback.briefEnabled === undefined && fallback.auditEnabled === undefined
+      ? {}
+      : { briefEnabled: duty('briefEnabled'), auditEnabled: duty('auditEnabled') }
   return {
     enabled,
+    ...duties,
     provider,
     model,
     timeoutMs,

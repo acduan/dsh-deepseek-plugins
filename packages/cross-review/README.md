@@ -87,13 +87,25 @@
 | 项 | 说明 |
 |---|---|
 | **启用开关** | 停用后对应工具直接放行，**不启动子代理**，节省 token 与时间 |
+| **职责勾选**（仅裁决者） | 需求解析、交付审核可分别开关，例如只启用需求解析 |
 | **Provider / 模型 / 推理强度** | 从当前 DSH 已配置且注册的 LLM providers 动态读取 |
 | **超时时长** | 按秒配置，范围 10–1800 秒，默认 180 秒；每个角色独立 |
 
 默认值：
 
 - **复核者**：Hy4 · WorkBuddy，180 秒
-- **裁决者**：GPT-6.1 Sol · PackyCode1，180 秒
+- **裁决者**：GPT-6.1 Sol · PackyCode1，180 秒，需求解析与交付审核都开启
+
+### 裁决者的两个职责可独立开关
+
+| 勾选状态 | `cross_review_brief` | `cross_review_final` |
+|---|---|---|
+| 都勾选（默认） | 启动子代理解析需求 | 启动子代理审核交付 |
+| 只勾选需求解析 | 启动子代理 | 直接返回 `ready`，不启动子代理 |
+| 只勾选交付审核 | 直接返回空规格，不启动子代理 | 启动子代理 |
+| 都不勾选 | 直接放行 | 直接放行 |
+
+`cross_review_arbitrate`（争议裁决）只受角色级启用开关控制。
 
 停用某个角色后的行为：
 
@@ -104,7 +116,7 @@
 | 裁决者 | `cross_review_final` | 返回 `ready` 并说明"已停用"，不再审核 |
 | 裁决者 | `cross_review_arbitrate` | 返回 `uphold_main` 并说明"已停用" |
 
-协议提示词会同步显示当前停用状态，主代理不会误以为该角色仍在工作。
+协议提示词会同步显示当前停用状态（含职责级关闭），主代理不会误以为该角色仍在工作。
 
 配置通过 `/api/cross-review-config` 读写并持久化在 `cross_review_config` storage domain 中。
 
@@ -125,6 +137,8 @@
       timeoutMs: 180000
     arbiter:
       enabled: true
+      briefEnabled: true
+      auditEnabled: false
       provider: magpie-responses
       model: packycode1/gpt-6.1-sol
       reasoningEffort: high

@@ -32,6 +32,14 @@ window.__ModuleLoader__.load({
       .rbm-switch input:checked + .rbm-switch-track .rbm-switch-thumb { transform: translateX(15px); }
       .rbm-switch input:focus-visible + .rbm-switch-track { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
       .rbm-switch-label { color: var(--dsw-alias-label-secondary); font-size: 11px; }
+      .rbm-check { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; }
+      .rbm-check input { position: absolute; opacity: 0; width: 0; height: 0; }
+      .rbm-check-box { position: relative; width: 15px; height: 15px; border-radius: 4px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-base); flex: none; }
+      .rbm-check input:checked + .rbm-check-box { background: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); }
+      .rbm-check input:checked + .rbm-check-box::after { content: ""; position: absolute; left: 4px; top: 1px; width: 5px; height: 9px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+      .rbm-check input:focus-visible + .rbm-check-box { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+      .rbm-check input:disabled + .rbm-check-box { opacity: .5; cursor: not-allowed; }
+      .rbm-check-text { color: var(--dsw-alias-label-secondary); font-size: 12px; }
       .rbm-row { display: grid; grid-template-columns: 92px minmax(0, 1fr); align-items: center; gap: 10px; }
       .rbm-label { color: var(--dsw-alias-label-secondary); font-size: 12px; }
       .rbm-select { width: 100%; min-width: 0; box-sizing: border-box; appearance: auto; background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; padding: 6px 8px; }
@@ -59,13 +67,18 @@ window.__ModuleLoader__.load({
     `
 
     function cloneRoute(route) {
-      return {
+      const copy = {
         enabled: route && typeof route.enabled === 'boolean' ? route.enabled : true,
         provider: route && typeof route.provider === 'string' ? route.provider : '',
         model: route && typeof route.model === 'string' ? route.model : '',
         reasoningEffort: route && typeof route.reasoningEffort === 'string' ? route.reasoningEffort : '',
         timeoutMs: route && typeof route.timeoutMs === 'number' ? route.timeoutMs : 180000,
       }
+      // Duty switches belong to the arbiter only; copy them when the stored
+      // record already carries them so the reviewer never gains stray keys.
+      if (route && typeof route.briefEnabled === 'boolean') copy.briefEnabled = route.briefEnabled
+      if (route && typeof route.auditEnabled === 'boolean') copy.auditEnabled = route.auditEnabled
+      return copy
     }
 
     function cloneDraft(config) {
@@ -84,13 +97,20 @@ window.__ModuleLoader__.load({
     }
 
     function toRoutePayload(route) {
-      return {
+      const base = {
         enabled: route.enabled !== false,
         provider: route.provider,
         model: route.model,
         reasoningEffort: route.reasoningEffort || undefined,
         timeoutMs: route.timeoutMs,
       }
+      // Duty switches exist only on the arbiter; sending them for the reviewer
+      // would add meaningless keys to its stored record.
+      if (route.briefEnabled !== undefined || route.auditEnabled !== undefined) {
+        base.briefEnabled = route.briefEnabled !== false
+        base.auditEnabled = route.auditEnabled !== false
+      }
+      return base
     }
 
     function modelOptions(groups, provider, currentModel) {
@@ -124,13 +144,26 @@ window.__ModuleLoader__.load({
     }
 
     function RouteCard(props) {
-      const { title, description, route, groups, onChange, disabledNote } = props
+      const { title, description, route, groups, onChange, disabledNote, duties } = props
       const providers = providerOptions(groups, route.provider)
       const models = modelOptions(groups, route.provider, route.model)
       const efforts = effortOptions(groups, route)
       const providerName = (providers.find((option) => option.value === route.provider) || {}).label || route.provider
       const modelName = (models.find((option) => option.value === route.model) || {}).label || route.model
       const off = route.enabled === false
+      const dutyRows = Array.isArray(duties)
+        ? duties.map((duty) => h('div', { className: 'rbm-row', key: duty.field },
+            h('span', { className: 'rbm-label' }, duty.label),
+            h('label', { className: 'rbm-check' },
+              h('input', {
+                type: 'checkbox',
+                checked: route[duty.field] !== false,
+                disabled: off,
+                onChange: (event) => onChange(duty.field, event.target.checked),
+              }),
+              h('span', { className: 'rbm-check-box' }),
+              h('span', { className: 'rbm-check-text' }, duty.hint))))
+        : null
       return h('section', { className: 'rbm-card' + (off ? ' rbm-card-off' : '') },
         h('div', { className: 'rbm-card-head' },
           h('div', { className: 'rbm-card-title-row' },
@@ -187,6 +220,7 @@ window.__ModuleLoader__.load({
               onChange: (event) => onChange('timeoutMs', fromSeconds(event.target.value)),
             }),
             h('span', { className: 'rbm-unit' }, '秒'))),
+        dutyRows,
         h('div', { className: 'rbm-current' }, '当前：', h('code', null, providerName + ' / ' + modelName + (route.reasoningEffort ? ' / ' + route.reasoningEffort : '') + ' / ' + toSeconds(route.timeoutMs) + 's')))
     }
 
@@ -293,6 +327,10 @@ window.__ModuleLoader__.load({
             title: '裁决者（brief / final / arbitrate）',
             description: '开工前解析需求、收尾时审核交付、争议时裁决。默认 GPT-6.1 Sol · PackyCode1。',
             disabledNote: '裁决者已停用：需求解析、交付审核与争议裁决将直接放行，不再启动子代理。',
+            duties: [
+              { field: 'briefEnabled', label: '需求解析', hint: '开工前整理规格与验收标准（cross_review_brief）' },
+              { field: 'auditEnabled', label: '交付审核', hint: '收尾时逐条核对验收标准（cross_review_final）' },
+            ],
             route: draft.arbiter,
             groups,
             onChange: (field, value) => onChange('arbiter', field, value),
