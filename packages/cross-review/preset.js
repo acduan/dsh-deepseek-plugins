@@ -459,15 +459,25 @@ async function runChild(ctx, exec, preset, route, prompt, label, timeoutMs) {
   if (exec.agent === undefined) {
     throw new Error('交叉复核模式工具必须由 Agent 调用（exec.agent 缺失）')
   }
+  // The DSH subagent runtime expects a FLAT activation spec: `parent`, `prompt`,
+  // `agentPreset` and `agentOptions` are top-level fields, not a nested `request`
+  // object. Passing them nested leaves `spec.parent` undefined, and the runtime
+  // then throws "Cannot read properties of undefined (reading 'id')" when it
+  // authorizes the child. Route policy fields (enabled / briefEnabled /
+  // auditEnabled / timeoutMs) are also stripped here: only model identity may be
+  // forwarded to the child agent's options.
+  const childAgentOptions = {
+    ...(typeof route?.provider === 'string' ? { provider: route.provider } : {}),
+    ...(typeof route?.model === 'string' ? { model: route.model } : {}),
+    ...(typeof route?.reasoningEffort === 'string' ? { reasoningEffort: route.reasoningEffort } : {}),
+  }
   const activation = await subagents.startActivation({
     provider: 'spawn',
     label,
-    request: {
-      prompt: [{ type: 'text', text: prompt }],
-      parent: exec.agent,
-      agentPreset: preset,
-      agentOptions: route,
-    },
+    prompt: [{ type: 'text', text: prompt }],
+    parent: exec.agent,
+    agentPreset: preset,
+    agentOptions: childAgentOptions,
     signal: exec.signal,
     delivery: 'caller',
   })
@@ -1207,4 +1217,5 @@ export {
   normalizeFinalAudit,
   parseJsonLoose,
   routeOf,
+  runChild,
 }
