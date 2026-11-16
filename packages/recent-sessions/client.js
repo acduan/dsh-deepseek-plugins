@@ -306,20 +306,40 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Locate the sidebar shell's workspace region and reserve vertical space for
-     * this section at its top, so the "工作区" browser is pushed down instead of
-     * being covered. Returns the measured rectangle for the fixed section.
+     * Locate the sidebar shell's workspace region. The current shell marks the
+     * workspace header with data-sidebar-workspace-header and the sidebar
+     * scrollport with data-sidebar-scrollport; older builds nested the region
+     * after a panel-list nav. Support both.
+     */
+    function findWorkspaceRegion() {
+      const header = document.querySelector('[data-sidebar-workspace-header]');
+      if (header) {
+        let region = header.parentElement;
+        while (region && region.parentElement && !region.parentElement.hasAttribute('data-sidebar-scrollport')) {
+          region = region.parentElement;
+        }
+        if (region) return region;
+      }
+      const toggle = document.querySelector('[data-sidebar-toggle]');
+      if (toggle) {
+        let root = null;
+        for (let el = toggle; el; el = el.parentElement) {
+          if (el.querySelector(':scope > nav')) { root = el; break; }
+        }
+        if (root) {
+          const nav = root.querySelector(':scope > nav');
+          if (nav && nav.nextElementSibling) return nav.nextElementSibling;
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Reserve vertical space at the top of the workspace region so the
+     * "工作区" browser is pushed down instead of being covered.
      */
     function reserveSpace(height) {
-      const toggle = document.querySelector('[data-sidebar-toggle]');
-      if (!toggle) return null;
-      let root = null;
-      for (let el = toggle; el; el = el.parentElement) {
-        if (el.querySelector(':scope > nav')) { root = el; break; }
-      }
-      if (!root) return null;
-      const nav = root.querySelector(':scope > nav');
-      const region = nav ? nav.nextElementSibling : null;
+      const region = findWorkspaceRegion();
       if (!region) return null;
       const pad = height + 'px';
       if (region.style.paddingTop !== pad) region.style.paddingTop = pad;
@@ -460,10 +480,17 @@ window.__ModuleLoader__.load({
         const height = collapsed ? COLLAPSED_HEIGHT : EXPANDED_HEIGHT;
         let region = null;
         let observer = null;
+        let scrollport = null;
+        let onScroll = null;
         const measure = () => {
           const result = reserveSpace(height);
           if (!result) { setRect(null); return; }
           region = result.region;
+          if (scrollport == null && region.parentElement && region.parentElement.hasAttribute('data-sidebar-scrollport')) {
+            scrollport = region.parentElement;
+            onScroll = () => measure();
+            scrollport.addEventListener('scroll', onScroll, { passive: true });
+          }
           const next = result.rect;
           setRect((prev) => (prev && next && prev.top === next.top && prev.left === next.left && prev.width === next.width ? prev : next));
           if (observer == null && typeof ResizeObserver !== 'undefined') {
@@ -476,6 +503,7 @@ window.__ModuleLoader__.load({
         window.addEventListener('resize', measure);
         return () => {
           window.removeEventListener('resize', measure);
+          if (scrollport && onScroll) scrollport.removeEventListener('scroll', onScroll);
           if (observer) observer.disconnect();
           if (region && region.isConnected) {
             region.style.paddingTop = '';
