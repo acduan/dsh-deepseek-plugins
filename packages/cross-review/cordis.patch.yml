@@ -182,7 +182,7 @@
             name: '@deepseek-ai/dsh-tool-fs'
             config:
               read: true
-              readImage: false
+              readImage: true
               write: false
               edit: false
               applyPatch: false

@@ -454,6 +454,7 @@ function renderFiles(files) {
 
 async function collectSessionContext(ctx, exec) {
   const parts = []
+  const imageRefs = []
   let cwd = ''
   try {
     const wd = ctx.get('workingDirectory')
@@ -499,6 +500,9 @@ async function collectSessionContext(ctx, exec) {
                 .filter((text) => text.length > 0)
                 .join('\n')
             : '',
+          images: Array.isArray(message.content)
+            ? message.content.filter((block) => block !== null && typeof block === 'object' && block.type === 'image' && block.attachment).map((block) => block.attachment)
+            : [],
         })),
       )
       const relevant = (Array.isArray(messages) ? messages : [])
@@ -506,19 +510,50 @@ async function collectSessionContext(ctx, exec) {
           (message) =>
             (message.role === 'user' || message.role === 'assistant') &&
             typeof message.text === 'string' &&
-            message.text.trim().length > 0,
+            message.text.trim().length > 0 &&
+            !message.text.includes('<system-reminder>') &&
+            !message.text.startsWith('Time sampled while preparing turn'),
         )
         .slice(-6)
       if (relevant.length > 0) {
         const digest = relevant.map((message) => `[${message.role}] ${truncate(message.text, 1200)}`).join('\n\n')
         parts.push(`最近对话（自动摘要，可能已截断；请以工作区真实文件为准）：\n${digest}`)
       }
+      const userImageMessages = (Array.isArray(messages) ? messages : [])
+        .filter((message) => message.role === 'user' && Array.isArray(message.images) && message.images.length > 0)
+        .slice(-2)
+      const seen = new Set()
+      const attachments = ctx.get('attachments')
+      const imageLines = []
+      for (const message of userImageMessages) {
+        for (const ref of message.images) {
+          if (ref === null || typeof ref !== 'object') continue
+          const key = ref.attachmentId
+          if (key === undefined || seen.has(key)) continue
+          seen.add(key)
+          let hostPath
+          try {
+            if (attachments !== undefined && typeof attachments.imageHostPath === 'function') {
+              hostPath = attachments.imageHostPath(ref)
+            }
+          } catch {
+            hostPath = undefined
+          }
+          if (imageRefs.length < 6) imageRefs.push(ref)
+          const label = ref.name ? `（${ref.name}）` : ''
+          const size = ref.width && ref.height ? ` ${ref.width}x${ref.height}` : ''
+          imageLines.push(`- 图片${imageRefs.length}${label}${size}${typeof hostPath === 'string' && hostPath.length > 0 ? `：${hostPath}` : ''}`)
+        }
+      }
+      if (imageLines.length > 0) {
+        parts.push(`主会话最近图片（已随本次调用转交，可直接查看；如仍需本机文件可用 read_image 读取下列路径）：\n${imageLines.join('\n')}`)
+      }
     }
   } catch {
-    // conversation digest is best effort
+    // conversation digest and image forwarding are best effort
   }
-  if (parts.length === 0) return ''
-  return `\n\n===== 主会话自动上下文（系统只读附带；用于定位资源，最终以你实际读到的文件为准）=====\n${parts.join('\n\n')}\n===== 自动上下文结束 =====`
+  const text = parts.length === 0 ? '' : `\n\n===== 主会话自动上下文（系统只读附带；用于定位资源，最终以你实际读到的文件为准）=====\n${parts.join('\n\n')}\n===== 自动上下文结束 =====`
+  return { text, images: imageRefs }
 }
 
 function abortError(signal) {
@@ -550,15 +585,21 @@ async function runChild(ctx, exec, preset, route, prompt, label, timeoutMs) {
     ...(typeof route?.reasoningEffort === 'string' ? { reasoningEffort: route.reasoningEffort } : {}),
   }
   let promptWithContext = prompt
+  const promptBlocks = []
   try {
-    promptWithContext = `${prompt}${await collectSessionContext(ctx, exec)}`
+    const collected = await collectSessionContext(ctx, exec)
+    promptWithContext = `${prompt}${collected.text}`
+    promptBlocks.push({ type: 'text', text: promptWithContext })
+    for (const ref of Array.isArray(collected.images) ? collected.images : []) {
+      if (ref !== null && typeof ref === 'object') promptBlocks.push({ type: 'image', attachment: ref })
+    }
   } catch {
-    promptWithContext = prompt
+    promptBlocks.push({ type: 'text', text: prompt })
   }
   const activation = await subagents.startActivation({
     provider: 'spawn',
     label,
-    prompt: [{ type: 'text', text: promptWithContext }],
+    prompt: promptBlocks,
     parent: exec.agent,
     agentPreset: preset,
     agentOptions: childAgentOptions,
@@ -1252,6 +1293,7 @@ ${statusSection}
 
 ### 行为准则
 - 先证据后结论；不确定就说不确定并补验证。验收判定交给裁决者，你只提供可复现证据（命令 + 输出 + 文件路径），不自行下验收结论。
+- 主会话最近粘贴的图片会自动转交给裁决者（需求解析/交付审核）；视觉核对（配色、布局截图等）可交给 cross_review_final 完成。
 - 调用 cross_review_brief / cross_review_final 时，务必把涉及的工作区文件/目录路径填进 files，把工作目录、附件说明和会话背景填进 context。子代理看不到你的实时对话，只能用你给的材料和系统自动附带的会话摘要；关键资源一定要显式给路径，让它自己用 read/glob/grep 核对。
 - 不要以「只是小改动」跳过交付前的 cross_review_final 审核。
 - 最终回复里要写清：做了什么、验证了什么、还有哪些未验证或已知限制。`
