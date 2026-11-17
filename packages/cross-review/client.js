@@ -1,9 +1,13 @@
 // @local/dsh-cross-review/client
-// Browser half: a Settings section page with provider/model dropdowns for the
-// Cross-Verification Mode reviewer and arbiter. The model catalog is read from the Host
-// route /api/cross-review-config, which in turn reads the live DSH LLM provider
-// registry. The page writes the same route, so the selected routes persist in
-// the Host storage domain and are picked up by new tool calls immediately.
+// Browser half: a Settings section page for the Cross-Verification Mode arbiter.
+// The model catalog is read from the Host route /api/cross-review-config, which
+// in turn reads the live DSH LLM provider registry. The page writes the same
+// route, so the selected route persists in the Host storage domain and is picked
+// up by new tool calls immediately.
+//
+// A "test" button runs a one-prompt connectivity probe through the Host route,
+// so a dead gateway or an unsupported reasoning effort is visible here instead of
+// surfacing as a failed audit at the end of a task.
 
 window.__ModuleLoader__.load({
   id: '@local/dsh-cross-review',
@@ -11,6 +15,103 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
     const { useEffect, useMemo, useState } = React
+
+    const ZH =
+      typeof navigator === 'object' &&
+      String(navigator.language || navigator.userLanguage || '').toLowerCase().startsWith('zh')
+    const TEXT = ZH
+      ? {
+          title: '交叉复核模式',
+          subtitle:
+            '配置裁决者的启用状态、模型和超时时长。模型选项来自当前 DSH 已配置且注册的 LLM providers，保存后立即作用于后续调用。',
+          arbiterTitle: '裁决者（需求解析 / 交付审核）',
+          arbiterDesc: '开工前解析需求、收尾时审核交付。两项职责可分别关闭。',
+          arbiterOff: '裁决者已停用：需求解析与交付审核将直接放行，不再启动子代理。',
+          briefLabel: '需求解析',
+          briefHint: '开工前整理规格与验收标准（cross_review_brief）',
+          auditLabel: '交付审核',
+          auditHint: '收尾时逐条核对验收标准（cross_review_final）',
+          provider: 'Provider',
+          model: '模型',
+          effort: '推理强度',
+          effortDefault: '模型默认',
+          timeout: '超时',
+          seconds: '秒',
+          enabled: '已启用',
+          disabled: '已停用',
+          current: '当前：',
+          test: '测试',
+          testing: '测试中…',
+          testOk: '连通正常',
+          testFail: '测试失败',
+          save: '保存',
+          saving: '保存中…',
+          refresh: '刷新模型列表',
+          reset: '恢复默认',
+          resetDone: '已恢复默认配置。',
+          resetFail: '恢复默认失败：',
+          loading: '正在读取当前可用模型…',
+          loadFail: '读取失败：',
+          retry: '重试',
+          unsaved: '有未保存的修改',
+          saved: '已保存，立即用于后续调用。',
+          savedMemory: '已保存到当前进程（存储不可用，重启后会恢复默认值）。',
+          saveFail: '保存失败：',
+          noProvider: '（无可用 provider）',
+          noModel: '（该 provider 无可用模型）',
+          storedUnavailable: '当前保存，当前不可用',
+          storedEffort: '当前保存',
+          partialFail: '部分 provider 读取失败：',
+          storageOff: '存储不可用',
+          footer:
+            '提示：停用裁决者后，对应工具会直接跳过而不启动子代理；超时按秒配置，范围 10–1800 秒。修改只影响新产生的调用，不改写已记录的历史工具结果。',
+        }
+      : {
+          title: 'Cross-Verification Mode',
+          subtitle:
+            'Configure the enablement, model, and timeout of the arbiter. Model options come from the LLM providers currently configured and registered in DSH; saving applies to later calls immediately.',
+          arbiterTitle: 'Arbiter (requirement brief / delivery audit)',
+          arbiterDesc: 'Parses the requirement up front and audits delivery at the end. Each duty toggles separately.',
+          arbiterOff: 'Arbiter disabled: requirement briefing and delivery audit both pass through without a child agent.',
+          briefLabel: 'Requirement brief',
+          briefHint: 'Turns the request into an acceptance spec before work starts (cross_review_brief)',
+          auditLabel: 'Delivery audit',
+          auditHint: 'Checks every acceptance criterion before delivery (cross_review_final)',
+          provider: 'Provider',
+          model: 'Model',
+          effort: 'Reasoning',
+          effortDefault: 'Model default',
+          timeout: 'Timeout',
+          seconds: 's',
+          enabled: 'Enabled',
+          disabled: 'Disabled',
+          current: 'Current: ',
+          test: 'Test',
+          testing: 'Testing…',
+          testOk: 'Reachable',
+          testFail: 'Test failed',
+          save: 'Save',
+          saving: 'Saving…',
+          refresh: 'Refresh models',
+          reset: 'Restore defaults',
+          resetDone: 'Defaults restored.',
+          resetFail: 'Restore failed: ',
+          loading: 'Reading the available models…',
+          loadFail: 'Load failed: ',
+          retry: 'Retry',
+          unsaved: 'Unsaved changes',
+          saved: 'Saved; applied to later calls.',
+          savedMemory: 'Saved in this process only (storage unavailable, defaults return after restart).',
+          saveFail: 'Save failed: ',
+          noProvider: '(no provider available)',
+          noModel: '(no model for this provider)',
+          storedUnavailable: 'saved, currently unavailable',
+          storedEffort: 'saved',
+          partialFail: 'Some providers failed to list: ',
+          storageOff: 'storage unavailable',
+          footer:
+            'Disabling the arbiter makes its tools pass through without starting a child agent. The timeout is 10–1800 seconds. Changes affect new calls only; recorded tool results are never rewritten.',
+        }
 
     const CSS = `
       .rbm-root { display: flex; flex-direction: column; gap: 18px; padding: 4px 2px 28px; max-width: 860px; }
@@ -52,9 +153,11 @@ window.__ModuleLoader__.load({
       .rbm-current { color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 1.5; }
       .rbm-current code { color: var(--dsw-alias-label-primary); font-size: 11px; }
       .rbm-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+      .rbm-card-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
       .rbm-btn { appearance: none; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; font-weight: 600; padding: 7px 16px; cursor: pointer; line-height: 1.2; }
       .rbm-btn:hover { border-color: var(--dsw-alias-brand-primary); }
       .rbm-btn:disabled { cursor: not-allowed; opacity: .55; }
+      .rbm-btn-small { padding: 5px 12px; font-weight: 500; }
       .rbm-btn-primary { background: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); color: #fff; }
       .rbm-btn-primary:hover { color: #fff; }
       .rbm-status { font-size: 12px; line-height: 1.4; }
@@ -67,22 +170,19 @@ window.__ModuleLoader__.load({
     `
 
     function cloneRoute(route) {
-      const copy = {
+      return {
         enabled: route && typeof route.enabled === 'boolean' ? route.enabled : true,
         provider: route && typeof route.provider === 'string' ? route.provider : '',
         model: route && typeof route.model === 'string' ? route.model : '',
         reasoningEffort: route && typeof route.reasoningEffort === 'string' ? route.reasoningEffort : '',
         timeoutMs: route && typeof route.timeoutMs === 'number' ? route.timeoutMs : 180000,
+        briefEnabled: !route || route.briefEnabled !== false,
+        auditEnabled: !route || route.auditEnabled !== false,
       }
-      // Duty switches belong to the arbiter only; copy them when the stored
-      // record already carries them so the reviewer never gains stray keys.
-      if (route && typeof route.briefEnabled === 'boolean') copy.briefEnabled = route.briefEnabled
-      if (route && typeof route.auditEnabled === 'boolean') copy.auditEnabled = route.auditEnabled
-      return copy
     }
 
     function cloneDraft(config) {
-      return { reviewer: cloneRoute(config && config.reviewer), arbiter: cloneRoute(config && config.arbiter) }
+      return cloneRoute(config && config.arbiter)
     }
 
     // Timeout is edited in seconds for readability; the Host stores milliseconds.
@@ -97,119 +197,182 @@ window.__ModuleLoader__.load({
     }
 
     function toRoutePayload(route) {
-      const base = {
+      return {
         enabled: route.enabled !== false,
+        briefEnabled: route.briefEnabled !== false,
+        auditEnabled: route.auditEnabled !== false,
         provider: route.provider,
         model: route.model,
         reasoningEffort: route.reasoningEffort || undefined,
         timeoutMs: route.timeoutMs,
       }
-      // Duty switches exist only on the arbiter; sending them for the reviewer
-      // would add meaningless keys to its stored record.
-      if (route.briefEnabled !== undefined || route.auditEnabled !== undefined) {
-        base.briefEnabled = route.briefEnabled !== false
-        base.auditEnabled = route.auditEnabled !== false
-      }
-      return base
     }
 
     function modelOptions(groups, provider, currentModel) {
       const group = (groups || []).find((entry) => entry.id === provider)
       const rows = group && Array.isArray(group.models) ? group.models : []
-      const options = rows.map((model) => ({ value: model.id, label: model.name && model.name !== model.id ? `${model.name} (${model.id})` : model.id }))
+      const options = rows.map((model) => ({
+        value: model.id,
+        label: model.name && model.name !== model.id ? `${model.name} (${model.id})` : model.id,
+      }))
       if (currentModel && !options.some((option) => option.value === currentModel)) {
-        options.unshift({ value: currentModel, label: `${currentModel}（当前保存，当前不可用）` })
+        options.unshift({ value: currentModel, label: `${currentModel}（${TEXT.storedUnavailable}）` })
       }
       return options
     }
 
     function providerOptions(groups, currentProvider) {
-      const options = (groups || []).map((group) => ({ value: group.id, label: group.name && group.name !== group.id ? `${group.name} (${group.id})` : group.id }))
+      const options = (groups || []).map((group) => ({
+        value: group.id,
+        label: group.name && group.name !== group.id ? `${group.name} (${group.id})` : group.id,
+      }))
       if (currentProvider && !options.some((option) => option.value === currentProvider)) {
-        options.unshift({ value: currentProvider, label: `${currentProvider}（当前保存，当前不可用）` })
+        options.unshift({ value: currentProvider, label: `${currentProvider}（${TEXT.storedUnavailable}）` })
       }
       return options
     }
 
     function effortOptions(groups, route) {
       const group = (groups || []).find((entry) => entry.id === route.provider)
-      const model = group && Array.isArray(group.models) ? group.models.find((entry) => entry.id === route.model) : undefined
+      const model =
+        group && Array.isArray(group.models) ? group.models.find((entry) => entry.id === route.model) : undefined
       const efforts = model && Array.isArray(model.reasoningEfforts) ? model.reasoningEfforts : []
-      const options = [{ value: '', label: '模型默认' }]
+      const options = [{ value: '', label: TEXT.effortDefault }]
       for (const effort of efforts) options.push({ value: effort, label: effort })
       if (route.reasoningEffort && !options.some((option) => option.value === route.reasoningEffort)) {
-        options.push({ value: route.reasoningEffort, label: `${route.reasoningEffort}（当前保存）` })
+        options.push({ value: route.reasoningEffort, label: `${route.reasoningEffort}（${TEXT.storedEffort}）` })
       }
       return options
     }
 
-    function RouteCard(props) {
-      const { title, description, route, groups, onChange, disabledNote, duties } = props
+    function ArbiterCard(props) {
+      const { route, groups, onChange, probe, onProbe, testing } = props
       const providers = providerOptions(groups, route.provider)
       const models = modelOptions(groups, route.provider, route.model)
       const efforts = effortOptions(groups, route)
       const providerName = (providers.find((option) => option.value === route.provider) || {}).label || route.provider
       const modelName = (models.find((option) => option.value === route.model) || {}).label || route.model
       const off = route.enabled === false
-      const dutyRows = Array.isArray(duties)
-        ? duties.map((duty) => h('div', { className: 'rbm-row', key: duty.field },
-            h('span', { className: 'rbm-label' }, duty.label),
-            h('label', { className: 'rbm-check' },
-              h('input', {
-                type: 'checkbox',
-                checked: route[duty.field] !== false,
-                disabled: off,
-                onChange: (event) => onChange(duty.field, event.target.checked),
-              }),
-              h('span', { className: 'rbm-check-box' }),
-              h('span', { className: 'rbm-check-text' }, duty.hint))))
-        : null
-      return h('section', { className: 'rbm-card' + (off ? ' rbm-card-off' : '') },
-        h('div', { className: 'rbm-card-head' },
-          h('div', { className: 'rbm-card-title-row' },
-            h('div', { className: 'rbm-card-title' }, title),
-            h('label', { className: 'rbm-switch' },
+      const dutyRows = [
+        { field: 'briefEnabled', label: TEXT.briefLabel, hint: TEXT.briefHint },
+        { field: 'auditEnabled', label: TEXT.auditLabel, hint: TEXT.auditHint },
+      ].map((duty) =>
+        h(
+          'div',
+          { className: 'rbm-row', key: duty.field },
+          h('span', { className: 'rbm-label' }, duty.label),
+          h(
+            'label',
+            { className: 'rbm-check' },
+            h('input', {
+              type: 'checkbox',
+              checked: route[duty.field] !== false,
+              disabled: off,
+              onChange: (event) => onChange(duty.field, event.target.checked),
+            }),
+            h('span', { className: 'rbm-check-box' }),
+            h('span', { className: 'rbm-check-text' }, duty.hint),
+          ),
+        ),
+      )
+
+      let probeLine = null
+      if (probe !== null && probe !== undefined) {
+        if (probe.kind === 'error') {
+          probeLine = h('span', { className: 'rbm-status rbm-status-error' }, `${TEXT.testFail}：${probe.text}`)
+        } else {
+          const parts = [`${TEXT.testOk} · ${(probe.latencyMs / 1000).toFixed(1)}s`]
+          if (probe.text) parts.push(`"${probe.text.slice(0, 60)}"`)
+          probeLine = h('span', { className: 'rbm-status rbm-status-ok' }, parts.join(' · '))
+        }
+      }
+
+      return h(
+        'section',
+        { className: 'rbm-card' + (off ? ' rbm-card-off' : '') },
+        h(
+          'div',
+          { className: 'rbm-card-head' },
+          h(
+            'div',
+            { className: 'rbm-card-title-row' },
+            h('div', { className: 'rbm-card-title' }, TEXT.arbiterTitle),
+            h(
+              'label',
+              { className: 'rbm-switch' },
               h('input', {
                 type: 'checkbox',
                 checked: !off,
                 onChange: (event) => onChange('enabled', event.target.checked),
               }),
               h('span', { className: 'rbm-switch-track' }, h('span', { className: 'rbm-switch-thumb' })),
-              h('span', { className: 'rbm-switch-label' }, off ? '已停用' : '已启用'))),
-          h('div', { className: 'rbm-card-desc' }, description),
-          off ? h('div', { className: 'rbm-card-note' }, disabledNote) : null),
-        h('div', { className: 'rbm-row' },
-          h('label', { className: 'rbm-label', htmlFor: `rbm-provider-${title}` }, 'Provider'),
-          h('select', {
-            id: `rbm-provider-${title}`,
-            className: 'rbm-select',
-            value: route.provider,
-            disabled: off,
-            onChange: (event) => onChange('provider', event.target.value),
-          }, providers.length > 0 ? providers.map((option) => h('option', { key: option.value, value: option.value }, option.label)) : h('option', { value: '' }, '（无可用 provider）'))),
-        h('div', { className: 'rbm-row' },
-          h('label', { className: 'rbm-label', htmlFor: `rbm-model-${title}` }, '模型'),
-          h('select', {
-            id: `rbm-model-${title}`,
-            className: 'rbm-select',
-            value: route.model,
-            disabled: off,
-            onChange: (event) => onChange('model', event.target.value),
-          }, models.length > 0 ? models.map((option) => h('option', { key: option.value, value: option.value }, option.label)) : h('option', { value: '' }, '（该 provider 无可用模型）'))),
-        h('div', { className: 'rbm-row' },
-          h('label', { className: 'rbm-label', htmlFor: `rbm-effort-${title}` }, '推理强度'),
-          h('select', {
-            id: `rbm-effort-${title}`,
-            className: 'rbm-select',
-            value: route.reasoningEffort || '',
-            disabled: off,
-            onChange: (event) => onChange('reasoningEffort', event.target.value),
-          }, efforts.map((option) => h('option', { key: option.value || 'default', value: option.value }, option.label)))),
-        h('div', { className: 'rbm-row' },
-          h('label', { className: 'rbm-label', htmlFor: `rbm-timeout-${title}` }, '超时'),
-          h('div', { className: 'rbm-timeout' },
+              h('span', { className: 'rbm-switch-label' }, off ? TEXT.disabled : TEXT.enabled),
+            ),
+          ),
+          h('div', { className: 'rbm-card-desc' }, TEXT.arbiterDesc),
+          off ? h('div', { className: 'rbm-card-note' }, TEXT.arbiterOff) : null,
+        ),
+        h(
+          'div',
+          { className: 'rbm-row' },
+          h('label', { className: 'rbm-label', htmlFor: 'rbm-provider' }, TEXT.provider),
+          h(
+            'select',
+            {
+              id: 'rbm-provider',
+              className: 'rbm-select',
+              value: route.provider,
+              disabled: off,
+              onChange: (event) => onChange('provider', event.target.value),
+            },
+            providers.length > 0
+              ? providers.map((option) => h('option', { key: option.value, value: option.value }, option.label))
+              : h('option', { value: '' }, TEXT.noProvider),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'rbm-row' },
+          h('label', { className: 'rbm-label', htmlFor: 'rbm-model' }, TEXT.model),
+          h(
+            'select',
+            {
+              id: 'rbm-model',
+              className: 'rbm-select',
+              value: route.model,
+              disabled: off,
+              onChange: (event) => onChange('model', event.target.value),
+            },
+            models.length > 0
+              ? models.map((option) => h('option', { key: option.value, value: option.value }, option.label))
+              : h('option', { value: '' }, TEXT.noModel),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'rbm-row' },
+          h('label', { className: 'rbm-label', htmlFor: 'rbm-effort' }, TEXT.effort),
+          h(
+            'select',
+            {
+              id: 'rbm-effort',
+              className: 'rbm-select',
+              value: route.reasoningEffort || '',
+              disabled: off,
+              onChange: (event) => onChange('reasoningEffort', event.target.value),
+            },
+            efforts.map((option) => h('option', { key: option.value || 'default', value: option.value }, option.label)),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'rbm-row' },
+          h('label', { className: 'rbm-label', htmlFor: 'rbm-timeout' }, TEXT.timeout),
+          h(
+            'div',
+            { className: 'rbm-timeout' },
             h('input', {
-              id: `rbm-timeout-${title}`,
+              id: 'rbm-timeout',
               className: 'rbm-input',
               type: 'number',
               min: 10,
@@ -219,9 +382,37 @@ window.__ModuleLoader__.load({
               disabled: off,
               onChange: (event) => onChange('timeoutMs', fromSeconds(event.target.value)),
             }),
-            h('span', { className: 'rbm-unit' }, '秒'))),
-        dutyRows,
-        h('div', { className: 'rbm-current' }, '当前：', h('code', null, providerName + ' / ' + modelName + (route.reasoningEffort ? ' / ' + route.reasoningEffort : '') + ' / ' + toSeconds(route.timeoutMs) + 's')))
+            h('span', { className: 'rbm-unit' }, TEXT.seconds),
+          ),
+        ),
+        ...dutyRows,
+        h(
+          'div',
+          { className: 'rbm-card-foot' },
+          h(
+            'button',
+            { type: 'button', className: 'rbm-btn rbm-btn-small', disabled: off || testing, onClick: onProbe },
+            testing ? TEXT.testing : TEXT.test,
+          ),
+          probeLine,
+        ),
+        h(
+          'div',
+          { className: 'rbm-current' },
+          TEXT.current,
+          h(
+            'code',
+            null,
+            providerName +
+              ' / ' +
+              modelName +
+              (route.reasoningEffort ? ' / ' + route.reasoningEffort : '') +
+              ' / ' +
+              toSeconds(route.timeoutMs) +
+              TEXT.seconds,
+          ),
+        ),
+      )
     }
 
     function CrossReviewSettingsPage() {
@@ -229,18 +420,26 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = useState(null)
       const [loading, setLoading] = useState(true)
       const [saving, setSaving] = useState(false)
+      const [dirty, setDirty] = useState(false)
       const [error, setError] = useState(null)
       const [status, setStatus] = useState(null)
+      const [probe, setProbe] = useState(null)
+      const [testing, setTesting] = useState(false)
 
-      async function load() {
+      async function load(options) {
+        const fresh = options !== null && options !== undefined && options.fresh === true
         setLoading(true)
         setError(null)
         try {
-          const response = await fetch('/api/cross-review-config', { credentials: 'same-origin' })
+          const response = await fetch(`/api/cross-review-config${fresh ? '?fresh=1' : ''}`, {
+            credentials: 'same-origin',
+          })
           const body = await response.json()
           if (!response.ok || !body.ok) throw new Error(body.error || 'HTTP ' + response.status)
           setData(body)
           setDraft(cloneDraft(body.config))
+          setDirty(false)
+          setProbe(null)
         } catch (loadError) {
           setError(loadError instanceof Error ? loadError.message : String(loadError))
         } finally {
@@ -255,23 +454,75 @@ window.__ModuleLoader__.load({
       const groups = data && data.models && Array.isArray(data.models.groups) ? data.models.groups : []
       const failures = data && data.models && Array.isArray(data.models.failures) ? data.models.failures : []
 
-      function onChange(side, field, value) {
+      function onChange(field, value) {
         setStatus(null)
+        setDirty(true)
         setDraft((previous) => {
           if (previous === null) return previous
-          const next = cloneDraft(previous)
-          const route = next[side]
-          route[field] = value
+          const next = cloneRoute(previous)
+          next[field] = value
           if (field === 'provider') {
             const group = groups.find((entry) => entry.id === value)
             const firstModel = group && Array.isArray(group.models) && group.models.length > 0 ? group.models[0].id : ''
-            route.model = firstModel
-            route.reasoningEffort = ''
+            next.model = firstModel
+            next.reasoningEffort = ''
           } else if (field === 'model') {
-            route.reasoningEffort = ''
+            next.reasoningEffort = ''
           }
           return next
         })
+      }
+
+      async function runProbe() {
+        if (draft === null || testing) return
+        setTesting(true)
+        setProbe(null)
+        try {
+          const response = await fetch('/api/cross-review-config', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ route: toRoutePayload(draft) }),
+          })
+          const body = await response.json()
+          if (!response.ok || !body.ok) throw new Error(body.error || 'HTTP ' + response.status)
+          setProbe({ kind: 'ok', latencyMs: body.probe.latencyMs, text: body.probe.text })
+        } catch (probeError) {
+          setProbe({
+            kind: 'error',
+            text: probeError instanceof Error ? probeError.message : String(probeError),
+          })
+        } finally {
+          setTesting(false)
+        }
+      }
+
+      async function resetDefaults() {
+        if (saving) return
+        setSaving(true)
+        setStatus(null)
+        try {
+          const response = await fetch('/api/cross-review-config', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action: 'reset' }),
+          })
+          const body = await response.json()
+          if (!response.ok || !body.ok) throw new Error(body.error || 'HTTP ' + response.status)
+          setData((previous) => ({ ...previous, config: body.config, persistent: body.persistent }))
+          setDraft(cloneDraft(body.config))
+          setDirty(false)
+          setProbe(null)
+          setStatus({ kind: 'ok', text: TEXT.resetDone })
+        } catch (resetError) {
+          setStatus({
+            kind: 'error',
+            text: TEXT.resetFail + (resetError instanceof Error ? resetError.message : String(resetError)),
+          })
+        } finally {
+          setSaving(false)
+        }
       }
 
       async function save() {
@@ -279,22 +530,23 @@ window.__ModuleLoader__.load({
         setSaving(true)
         setStatus(null)
         try {
-          const payload = {
-            arbiter: toRoutePayload(draft.arbiter),
-          }
           const response = await fetch('/api/cross-review-config', {
             method: 'PUT',
             credentials: 'same-origin',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(payload),
+            body: JSON.stringify({ arbiter: toRoutePayload(draft) }),
           })
           const body = await response.json()
           if (!response.ok || !body.ok) throw new Error(body.error || 'HTTP ' + response.status)
           setData((previous) => ({ ...previous, config: body.config, persistent: body.persistent }))
           setDraft(cloneDraft(body.config))
-          setStatus({ kind: 'ok', text: body.persistent ? '已保存，立即用于后续调用。' : '已保存到当前进程（存储不可用，重启后会恢复默认值）。' })
+          setDirty(false)
+          setStatus({ kind: 'ok', text: body.persistent ? TEXT.saved : TEXT.savedMemory })
         } catch (saveError) {
-          setStatus({ kind: 'error', text: '保存失败：' + (saveError instanceof Error ? saveError.message : String(saveError)) })
+          setStatus({
+            kind: 'error',
+            text: TEXT.saveFail + (saveError instanceof Error ? saveError.message : String(saveError)),
+          })
         } finally {
           setSaving(false)
         }
@@ -302,37 +554,76 @@ window.__ModuleLoader__.load({
 
       const modelSummary = useMemo(() => {
         if (data === null) return ''
-        return `${groups.length} 个 provider，${groups.reduce((count, group) => count + (Array.isArray(group.models) ? group.models.length : 0), 0)} 个模型`
+        const count = groups.reduce((total, group) => total + (Array.isArray(group.models) ? group.models.length : 0), 0)
+        return ZH ? `${groups.length} 个 provider，${count} 个模型` : `${groups.length} providers, ${count} models`
       }, [data, groups])
 
-      return h('div', { className: 'rbm-root' },
+      return h(
+        'div',
+        { className: 'rbm-root' },
         h('style', null, CSS),
-        h('div', { className: 'rbm-header' },
-          h('h1', { className: 'rbm-title' }, '交叉复核模式'),
-          h('p', { className: 'rbm-sub' }, '配置裁决者的启用状态、模型和超时时长。模型选项来自当前 DSH 已配置且注册的 LLM providers，保存后立即作用于后续调用。')),
-        loading ? h('div', { className: 'rbm-empty' }, '正在读取当前可用模型…') : null,
-        error ? h('div', { className: 'rbm-status rbm-status-error' }, '读取失败：' + error) : null,
-        !loading && error ? h('div', { className: 'rbm-footer' }, h('button', { className: 'rbm-btn', onClick: load }, '重试')) : null,
-        !loading && !error && draft !== null ? h(React.Fragment, null,
-          h(RouteCard, {
-            title: '裁决者（brief / final）',
-            description: '开工前解析需求、收尾时审核交付。默认 GPT-6.1 Sol · PackyCode1。',
-            disabledNote: '裁决者已停用：需求解析与交付审核将直接放行，不再启动子代理。',
-            duties: [
-              { field: 'briefEnabled', label: '需求解析', hint: '开工前整理规格与验收标准（cross_review_brief）' },
-              { field: 'auditEnabled', label: '交付审核', hint: '收尾时逐条核对验收标准（cross_review_final）' },
-            ],
-            route: draft.arbiter,
-            groups,
-            onChange: (field, value) => onChange('arbiter', field, value),
-          }),
-          failures.length > 0 ? h('div', { className: 'rbm-status rbm-status-muted' }, '部分 provider 读取失败：' + failures.map((failure) => failure.provider).join('、')) : null,
-          h('div', { className: 'rbm-footer' },
-            h('button', { className: 'rbm-btn rbm-btn-primary', disabled: saving, onClick: save }, saving ? '保存中…' : '保存'),
-            h('button', { className: 'rbm-btn', disabled: saving, onClick: load }, '刷新模型列表'),
-            h('span', { className: 'rbm-note' }, modelSummary + (data && data.persistent === false ? ' · 存储不可用' : '')),
-            status !== null ? h('span', { className: 'rbm-status ' + (status.kind === 'ok' ? 'rbm-status-ok' : 'rbm-status-error') }, status.text) : null)) : null,
-        h('div', { className: 'rbm-note' }, '提示：停用某个角色后，对应工具会直接放行而不启动子代理；超时按秒配置，范围 10–1800 秒。修改只影响新产生的调用，不改写已记录的历史工具结果。'))
+        h(
+          'div',
+          { className: 'rbm-header' },
+          h('h1', { className: 'rbm-title' }, TEXT.title),
+          h('p', { className: 'rbm-sub' }, TEXT.subtitle),
+        ),
+        loading ? h('div', { className: 'rbm-empty' }, TEXT.loading) : null,
+        error ? h('div', { className: 'rbm-status rbm-status-error' }, TEXT.loadFail + error) : null,
+        !loading && error
+          ? h('div', { className: 'rbm-footer' }, h('button', { className: 'rbm-btn', onClick: () => load() }, TEXT.retry))
+          : null,
+        !loading && !error && draft !== null
+          ? h(
+              React.Fragment,
+              null,
+              h(ArbiterCard, {
+                route: draft,
+                groups,
+                onChange,
+                probe,
+                testing,
+                onProbe: runProbe,
+              }),
+              failures.length > 0
+                ? h(
+                    'div',
+                    { className: 'rbm-status rbm-status-muted' },
+                    TEXT.partialFail + failures.map((failure) => failure.provider).join('、'),
+                  )
+                : null,
+              h(
+                'div',
+                { className: 'rbm-footer' },
+                h(
+                  'button',
+                  { className: 'rbm-btn rbm-btn-primary', disabled: saving || !dirty, onClick: save },
+                  saving ? TEXT.saving : TEXT.save,
+                ),
+                h(
+                  'button',
+                  { className: 'rbm-btn', disabled: saving || loading, onClick: () => load({ fresh: true }) },
+                  TEXT.refresh,
+                ),
+                h('button', { className: 'rbm-btn', disabled: saving || loading, onClick: resetDefaults }, TEXT.reset),
+                h(
+                  'span',
+                  { className: 'rbm-note' },
+                  modelSummary + (data && data.persistent === false ? ' · ' + TEXT.storageOff : ''),
+                ),
+                dirty ? h('span', { className: 'rbm-note' }, TEXT.unsaved) : null,
+                status !== null
+                  ? h(
+                      'span',
+                      { className: 'rbm-status ' + (status.kind === 'ok' ? 'rbm-status-ok' : 'rbm-status-error') },
+                      status.text,
+                    )
+                  : null,
+              ),
+            )
+          : null,
+        h('div', { className: 'rbm-note' }, TEXT.footer),
+      )
     }
 
     return {
@@ -341,12 +632,17 @@ window.__ModuleLoader__.load({
         const slots = ctx.get('slots')
         if (slots === undefined || typeof slots.inject !== 'function') return
         try {
-          slots.inject('settings.section', () => slots.register({
-            name: 'settings.section',
-            id: 'cross-review',
-            order: 25,
-            label: '交叉复核模式',
-          }, CrossReviewSettingsPage))
+          slots.inject('settings.section', () =>
+            slots.register(
+              {
+                name: 'settings.section',
+                id: 'cross-review',
+                order: 25,
+                label: TEXT.title,
+              },
+              CrossReviewSettingsPage,
+            ),
+          )
         } catch (error) {
           console.warn('dsh-cross-review: settings section registration failed:', error)
         }

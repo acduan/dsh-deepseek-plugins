@@ -1,9 +1,9 @@
 {
   "name": "@local/dsh-cross-review",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
-  "description": "Cross-Verification Mode: adversarial review preset, reviewer/arbiter tools, and model settings page.",
+  "description": "Cross-Verification Mode: an arbiter preset with requirement-brief and delivery-audit tools, plus a model settings page with a connectivity probe.",
   "license": "MIT",
   "main": "index.js",
   "exports": {
@@ -13,6 +13,9 @@
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "files": [
     "index.js",
     "preset.js",
@@ -20,7 +23,9 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "test"
   ],
   "dsh": {
     "bundle": {

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Cross-Verification Mode",
-    "description": "Main agent, reviewer, and arbiter composition with its model settings page."
+    "description": "An arbiter-led composition: the requirement is parsed before work starts and delivery is audited at the end. Includes model settings with a connectivity probe."
   }
 }

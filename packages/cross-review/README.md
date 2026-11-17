@@ -1,144 +1,89 @@
 # 交叉复核模式（Cross-Verification Mode）
 
-一个可选的 DSH Agent Preset，用双角色分工解决模型常见的 **幻觉、遗漏、绕路、过度自信，以及“未验证就打勾”**。
+一个可选的 DSH Agent Preset：由独立的「裁决者」模型在**开工前解析需求、收尾时审核交付**，补上主代理最容易犯的四类错误——**幻觉、遗漏、绕路、把"看起来做完了"当成完成**。
 
-核心设计：**裁决者在开工前解析需求、收尾时审核交付**，主代理负责执行与取证；交付验收由裁决者判定，主代理只提供可复现证据、不自行下验收结论。
+核心设计：**裁决者在首尾判定，主代理负责执行与取证。**
 
-> **当前版本说明**：已移除「复核者（cross_review）」「争议裁决（cross_review_arbitrate）」与「执行守卫」；仅保留裁决者的需求解析（cross_review_brief）与交付审核（cross_review_final）。下文涉及复核者/守卫/争议裁决的历史小节仅作存档，已不再生效。
+> **v1.2.0**：移除复核者角色及其全部逻辑（`cross_review` 途中复核工具、复核者模型配置、设置页卡片、协议章节）。现在只有首尾两个判定点。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 角色分工
 
-| 角色 | 模型 | 职责 | 调用时机 |
+| 角色 | 默认模型 | 职责 | 调用时机 |
 |---|---|---|---|
-| **裁决者** | 默认 GPT-6.1 Sol | 开工前解析需求、收尾时审核交付 | 任务首尾各一次 |
-| **主代理** | 你选择的模型 | 按规格执行 | 全程 |
-
-## 单一插件包
-
-本模式由**一个** bundle 包 `@local/dsh-cross-review` 提供全部能力：
-
-| 文件 | 作用 |
-|---|---|
-| `index.js` | Host 半：模型配置服务 `crossReviewConfig` + `/api/cross-review-config` 路由 |
-| `preset.js` | 预设内挂载：四个工具与执行守卫 |
-| `client.js` | Client 半：**Settings → 交叉复核模式** 模型设置页 |
-| `cordis.patch.yml` | 两个 Agent Preset 声明 |
+| **裁决者** | GPT-6.1 Sol · PackyCode1 | 需求解析、交付审核（两项可分别关闭） | 任务首尾各一次 |
+| **主代理** | 你选择的模型 | 按规格执行、产出可复现证据 | 全程 |
 
 ## 工具
 
-### `cross_review_brief` — 需求解析（开工前一次）
+### `cross_review_brief` — 需求解析（开工前）
 
-把用户原始需求交给裁决者，返回：
+把用户原始需求交给裁决者，返回 `goal` / `in_scope` / `out_of_scope` / `acceptance_criteria` / `assumptions` / `open_questions` / `risks` / `suggested_steps`。
 
-- `goal`：一句话目标
-- `in_scope` / `out_of_scope`：范围边界
-- `acceptance_criteria`：**可验证**的验收标准
-- `assumptions`：裁决者做的合理推断
-- `open_questions`：必须问用户才能确定的
-- `risks` / `suggested_steps`
+结果会**按会话被插件记住**，收尾审核自动复用，不需要主代理再抄一遍。
 
-目的：让主代理一开始就理解正确，避免做完才发现方向错。
+### `cross_review_final` — 交付审核（收尾）
 
-### `cross_review` — 过程监督 + 引导
-
-把当前步骤交给复核者，返回三种结论：
-
-- `consensus`：可行，按 `guidance` 优化后继续
-- `proceed_with_caution`：**可以继续**，但要把 `watchpoints` 当检查清单
-- `objection`：仅当会导致返工/损坏/安全问题时出现
-
-关键输出字段：
-
-- `guidance`：下一步该做什么、更省力的路径（**最有价值**）
-- `focus_next`：接下来最该优先处理的事项
-- `watchpoints`：过程中要盯住的风险点
-- `objections`：仅限阻塞项
-
-只有 `objections` 和 `required_fixes` 会导致阻塞；`risks`、`omissions`、`alternatives` 都是建议性质。
-
-### `cross_review_final` — 交付审核（收尾一次）
-
-把验收标准和交付声明交给裁决者，它会**自己核对文件与测试**，返回：
+逐条核对验收标准，自己读文件、跑只读检查，返回：
 
 - `ready`：可以宣布交付
 - `not_ready`：有验收标准 fail，按 `required_actions` 修
-- `need_more_evidence`：有验收标准无法验证，需补证据
+- `need_more_evidence`：关键项无法验证，先补证据
+- `error`：审核本身没跑成（超时/模型故障/被取消）。**既不是通过也不是不通过**，协议要求主代理重试一次或明确披露「未复核」
+
+`requirement` 可以省略：省略时自动使用 brief 的验收标准；若显式传入，系统会额外附上一份 brief 版本并标注"主代理未改写"，让裁决者指出两者差异。
 
 审核会专门识别这些虚假完成：声称改了但文件没变、声称测试通过但没有输出、只做了一部分却说全部完成、把"能编译"当成"功能正确"。
 
-### `cross_review_arbitrate` — 争议裁决
+## 子代理能看到什么
 
-主代理与复核者多轮仍无法达成共识时使用，提交双方立场给裁决者。
+子代理在独立会话中运行，看不到主代理的实时对话。每次调用由插件自动附带：
 
-## 执行守卫与中断
+- **工作目录**与最近若干轮 user/assistant 文本摘要（截断、只读）
+- **客观事实**：本会话真实的 `write` / `edit` / `apply_patch` 目标路径、`pwsh` / `bash` 命令与失败记录——从会话事件日志提取，**主代理无法改写**。这是对抗"声称改了但没改"的主要手段
+- 主会话最近粘贴的图片（自动转交，可直接查看）
+- 你通过 `files` 参数显式给出的文件/目录路径
 
-主模式默认 `enforceGuard: true`。以下工具调用需要先有一次通过的复核，否则会被拦截：
+## 健壮性
 
-`write`、`edit`、`apply_patch`、`bash`、`pwsh`、`ask_user_question`、`present`、`spawn_teammate`。
+- **结构化输出**：子代理通过运行时的 `outputSchema` 提交结果，由运行时校验；模型不再需要在正文里祈求"只输出 JSON"。
+- **一次重试**：`stopReason=error` 或可识别的瞬时网络/限流错误会重试一次（900ms 后）。取消与超时**不会**重试。
+- **超时**：范围 10–1800 秒，默认 180 秒；超时立即返回 `error` 并释放子代理。
+- **可取消**：工具观察 `exec.signal`，已取消的调用不会启动子代理；用户点停止会 `dispose()` 子代理，会话立即终止。
+- **无硬依赖**：`subagents` 不是挂载依赖；缺失时工具返回可操作的错误，而不是让整个预设组合挂掉。
 
-- `consensus` 和 `proceed_with_caution` **都授权**后续动作，只有 `objection` 阻塞。
-- `reviewUses`（默认 8）：一次复核在 TTL 内可授权多次匹配动作，避免每个写操作都要重新审查。
-- `reviewTimeoutMs`（默认 180000）：复核/裁决超时后立即返回 `error` 结论，不会无限挂住。
-- 用户点击停止时，工具会观察 `exec.signal` 并 `dispose()` 子代理，会话可立即终止。
+### 只读边界（重要）
 
-## 模型配置
+内部子代理预设的**文件工具**是真只读：`write` / `edit` / `applyPatch` 全部关闭。但 **shell 工具仍然可用**（用于跑只读检查和测试），它继承当前会话的沙箱与审批策略。也就是说，"不要修改文件"对 shell 而言是**提示词层面的约束**，不是运行时强制。需要强隔离时，请在下层用 `dsh-sandbox-policy` 的 `read-only` 模式约束子会话，或从该预设移除 shell 工具。
 
-打开 **Settings → 交叉复核模式**，每个角色一张卡片，可配置：
+## 配置
+
+打开 **Settings → 交叉复核模式**。一张卡片配置裁决者：
 
 | 项 | 说明 |
 |---|---|
-| **启用开关** | 停用后对应工具直接放行，**不启动子代理**，节省 token 与时间 |
-| **职责勾选**（仅裁决者） | 需求解析、交付审核可分别开关，例如只启用需求解析 |
-| **Provider / 模型 / 推理强度** | 从当前 DSH 已配置且注册的 LLM providers 动态读取 |
-| **超时时长** | 按秒配置，范围 10–1800 秒，默认 180 秒；每个角色独立 |
+| 启用开关 | 停用后两个工具直接放行，**不启动子代理** |
+| Provider / 模型 / 推理强度 | 从当前 DSH 已配置且注册的 LLM providers 动态读取 |
+| 超时 | 秒，10–1800，默认 180 |
+| **测试** | 用当前草稿路由发一句极短 prompt，返回延迟与回复；配置错了当场可见，而不是等任务收尾才失败 |
+| **恢复默认** | 重置回出厂路由（升级后模型 id 失效时最省事） |
 
-默认值：
+保存时若提交的路由与已存值相同则直接沿用（不再校验）：一个已失效的历史模型不会阻塞保存，页面会把它标成"当前保存，当前不可用"，改一下或点恢复默认即可。
 
-- **裁决者**：GPT-6.1 Sol · PackyCode1，180 秒，需求解析与交付审核都开启
+裁决者的两项职责（需求解析 / 交付审核）可独立勾选。模型目录在 Host 侧**并行探测并缓存 60 秒**，"刷新模型列表"会强制重新探测。
 
-### 裁决者的两个职责可独立开关
+配置通过 `/api/cross-review-config` 读写（GET 目录、PUT 保存、POST 连通性探测与 `action: 'reset'`），持久化在 `cross_review_config` storage domain。
 
-| 勾选状态 | `cross_review_brief` | `cross_review_final` |
-|---|---|---|
-| 都勾选（默认） | 启动子代理解析需求 | 启动子代理审核交付 |
-| 只勾选需求解析 | 启动子代理 | 直接返回 `ready`，不启动子代理 |
-| 只勾选交付审核 | 直接返回空规格，不启动子代理 | 启动子代理 |
-| 都不勾选 | 直接放行 | 直接放行 |
-
-`cross_review_arbitrate`（争议裁决）只受角色级启用开关控制。
-
-停用某个角色后的行为：
-
-| 停用角色 | 受影响工具 | 行为 |
-|---|---|---|
-| 复核者 | `cross_review` | 返回 `consensus` 并说明"已停用"，执行守卫照常授权 |
-| 裁决者 | `cross_review_brief` | 返回空规格并说明"已停用"，主代理按自身理解执行 |
-| 裁决者 | `cross_review_final` | 返回 `ready` 并说明"已停用"，不再审核 |
-| 裁决者 | `cross_review_arbitrate` | 返回 `uphold_main` 并说明"已停用" |
-
-协议提示词会同步显示当前停用状态（含职责级关闭），主代理不会误以为该角色仍在工作。
-
-配置通过 `/api/cross-review-config` 读写并持久化在 `cross_review_config` storage domain 中。
-
-## 配置文件方式（备用）
+### 配置文件方式（备用）
 
 ```yaml
 - id: cross-review-preset
   name: '@local/dsh-cross-review/preset'
   config:
-    enforceGuard: true
-    reviewUses: 8
     reviewTimeoutMs: 180000
-    reviewer:
-      enabled: true
-      provider: magpie
-      model: workbuddy/hy4free
-      reasoningEffort: high
-      timeoutMs: 180000
     arbiter:
       enabled: true
       briefEnabled: true
-      auditEnabled: false
+      auditEnabled: true
       provider: magpie-responses
       model: packycode1/gpt-6.1-sol
       reasoningEffort: high
@@ -147,24 +92,37 @@
 
 配置文件值只作为 `crossReviewConfig` 服务不可用时的 fallback；正常桌面 profile 下，设置页保存的值优先。
 
-## 资源上下文（files 与自动摘要）
+## 轻量任务可以跳过
 
-子代理在独立会话中运行、看不到主代理的实时对话，因此：
-
-- `cross_review_brief` / `cross_review` / `cross_review_final` 都支持 `files` 参数：把本轮涉及的工作区文件/目录路径填进去，子代理会用 `read`/`glob`/`grep` 自行核对。
-- 调用时插件会自动附带「主会话自动上下文」：当前工作目录 + 最近若干轮 user/assistant 文本摘要（截断、只读），用于让子代理定位资源；它仍以实际读到的文件为准。
-- 附件/图片只在摘要里以名称提示，不会被自动读取；需要时把内容或落盘路径显式传入。
+纯问答、只读检索、单行格式确认这类**没有文件改动也没有外部副作用**的请求，可以跳过 brief 与 final——但要在回复里说明"本次未走交叉复核"，不要假装复核过。这条豁免写在协议里，因为对小任务起两次子代理并不划算。
 
 ## 设计取舍
 
-- **不按步骤阻塞**：早期版本对每个工具调用都强制复核，导致子代理调用次数爆炸、体感很慢。现在改为"关键节点按需 + 首尾各一次"。
-- **复核者输出分三层**：引导 > 监督 > 拦截，避免把所有建议都当成阻塞项。
-- **审核必须自己验证**：交付审核不采信主代理的声明，必须核对真实文件与测试输出。
-- **内部预设只有一个**：复核者和裁决者共用同一份只读预设，角色由任务消息指定，减少启动时的 eager 挂载开销。
+- **不装执行守卫**：守卫把每个写操作都变成一次子代理调用，代价远大于收益。现在的约束是"首尾判定"，靠协议而非锁。
+- **没有途中复核**：只有一个判定者、两个时间点。途中发现偏差靠主代理自己的证据与 todo，而不是再加一个常驻角色。
+- **审核必须自己验证**：交付审核不采信主代理的声明，另外拿系统提供的工具调用事实对账。
+- **单一内部预设**：只有一份只读子代理预设，减少启动时的 eager 挂载开销。
 
-## 说明与限制
+## 已知限制
 
-- 每次复核/审核都会启动一个独立子代理，耗费额外 token 与时间；这是该模式的核心成本。
-- 子代理看不到主代理的对话，因此 `subject` / `requirement` / `claim` 必须自包含。
-- 子代理被限制为只读：不修改文件、不安装依赖、不提交或部署。
-- 内部预设 `cross-review-internal` 会出现在预设列表中，请勿作为普通工作模式选择。
+- 每次调用都会启动一个独立子代理，消耗额外 token 与时间——这是该模式的核心成本。
+- 子代理看不到主代理的对话，`requirement` / `claim` 必须自包含。
+- 内部预设 `cross-review-internal` 出现在预设列表里（名称为"内部只读子代理（请勿选择此模式）"），因为 registry 没有隐藏声明的能力。
+
+## 文件
+
+| 文件 | 作用 |
+|---|---|
+| `index.js` | Host 半：模型配置服务 `crossReviewConfig` + `/api/cross-review-config` 路由（含探测与重置） |
+| `preset.js` | 预设内挂载：两个工具与协议提示词 |
+| `client.js` | Client 半：Settings 页（中英双语） |
+| `cordis.patch.yml` | 两个 Agent Preset 声明 |
+| `test/` | 纯函数、配置层与工具注册的单元测试 |
+
+## 测试
+
+```bash
+node --test
+```
+
+覆盖结构化解析容错、`ready` 的 fail-closed 判定、工具调用事实提取、协议状态文案、超时钳制、目录缓存、连通性探测、重试与取消，以及 `apply()` 的真实注册与 brief→final 端到端交接。

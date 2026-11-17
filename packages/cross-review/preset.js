@@ -1,16 +1,25 @@
 // @local/dsh-cross-review
 // Host plugin for the "Cross-Verification Mode" (交叉复核模式) agent preset.
 //
-// It registers two model-facing tools on every Agent using this preset:
-//   - cross_review: spawns an independent reviewer child on a different model
-//     (default Hy4.WorkBuddy via `magpie`) and waits for its verdict.
-//   - cross_review_arbitrate: when review and main disagree, spawns an arbiter
-//     child on GPT-6.1 Sol (via `magpie-responses`) and returns a binding ruling.
+// It registers two model-facing tools and one system-prompt protocol section:
 //
-// It also installs a small tool guard so write/edit/shell/ask-user/present/
-// spawn-teammate calls consume a fresh `consensus` review, and a system-prompt
-// protocol section that explains the mode. The plugin is mounted only inside a
-// preset (never globally), so ordinary sessions are unaffected.
+//   cross_review_brief : opening requirement brief, executed by the arbiter.
+//   cross_review_final : closing delivery audit, executed by the arbiter. It
+//                        reuses the brief this plugin remembered for the session,
+//                        so the main agent does not have to copy criteria around.
+//
+// There is no reviewer role and no mid-task review tool: the only judgement in
+// this mode happens at the two ends of the task.
+//
+// There is deliberately no execution guard: an earlier revision gated write,
+// shell, ask-user and present calls behind a fresh consensus review, which
+// multiplied child agents and made the mode unusably slow. Nothing in this file
+// tracks review state for enforcement; a verdict is advice the main agent obeys
+// because the protocol tells it to, not a lock.
+//
+// Every call receives objective, plugin-derived facts about what the session has
+// actually done (files written, commands run, failed calls) extracted from the
+// session event log, so the child does not have to take the caller's word for it.
 //
 // No imports from the DSH installation are used on purpose: profile-installed
 // plugins are resolved from the user profile, and importing dsh packages there
@@ -18,13 +27,10 @@
 // plain tool-definition shape.
 
 export const name = 'cross-review'
-export const inject = ['tools', 'subagents', 'systemPrompt']
-
-const DEFAULT_REVIEWER = {
-  provider: 'magpie',
-  model: 'workbuddy/hy4free',
-  reasoningEffort: 'high',
-}
+// `subagents` is intentionally not a hard dependency: without it the plugin still
+// mounts and each tool returns an actionable error instead of breaking the whole
+// preset composition.
+export const inject = ['tools', 'systemPrompt']
 
 const DEFAULT_ARBITER = {
   provider: 'magpie-responses',
@@ -35,29 +41,20 @@ const DEFAULT_ARBITER = {
   auditEnabled: true,
 }
 
-const REVIEW_TTL_MS = 20 * 60 * 1000
+const DEFAULT_TIMEOUT_MS = 180000
+// One retry is enough: a second consecutive infrastructure failure is reported
+// rather than paid for twice.
+const RETRY_DELAY_MS = 900
+const RETRYABLE_ERROR = /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|\b(408|429|500|502|503|504)\b|rate.?limit|overloaded|temporar|timeout/i
 
-// Tools that require a fresh consensus review before a call is dispatched.
-const ENFORCED_TOOLS = new Set([
-  'write',
-  'edit',
-  'apply_patch',
-  'bash',
-  'pwsh',
-  'ask_user_question',
-  'present',
-  'spawn_teammate',
-])
+// The brief is remembered per session so the closing audit can reuse its
+// acceptance criteria verbatim. Twelve hours is longer than any realistic task and
+// short enough that a stale entry cannot leak into an unrelated session.
+const BRIEF_TTL_MS = 12 * 60 * 60 * 1000
+const briefs = new Map()
 
-const TARGETS_BY_CATEGORY = {
-  command: ['bash', 'pwsh'],
-  user_choice: ['ask_user_question'],
-  final: ['present'],
-}
-
-// Per-session proof of the last consensus review. The guard consumes it on the
-// first matching enforced tool call, so one review authorizes one action.
-const reviews = new Map()
+const WRITE_TOOLS = new Set(['write', 'edit', 'apply_patch'])
+const SHELL_TOOLS = new Set(['bash', 'pwsh'])
 
 function routeOf(value, fallback) {
   const hasRoute = value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -97,7 +94,7 @@ function routeOf(value, fallback) {
 
 function routeTimeout(route, fallbackMs) {
   if (Number.isFinite(route?.timeoutMs) && route.timeoutMs > 0) return route.timeoutMs
-  return Number.isFinite(fallbackMs) && fallbackMs > 0 ? fallbackMs : 180000
+  return Number.isFinite(fallbackMs) && fallbackMs > 0 ? fallbackMs : DEFAULT_TIMEOUT_MS
 }
 
 function routeLabel(route) {
@@ -139,6 +136,15 @@ function extractText(result) {
     .trim()
 }
 
+function safeJsonParse(text) {
+  if (typeof text !== 'string' || text.trim() === '') return undefined
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
 function parseJsonLoose(text) {
   const cleaned = String(text ?? '')
     .trim()
@@ -161,247 +167,87 @@ function parseJsonLoose(text) {
   return undefined
 }
 
-function normalizeReview(parsed, rawText, modelLabel) {
-  const record = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-  let verdict = typeof record.verdict === 'string' ? record.verdict.toLowerCase() : ''
-  if (['pass', 'passed', 'agree', 'agreed', 'consensus', 'ok'].includes(verdict)) verdict = 'consensus'
-  else if (['caution', 'proceed_with_caution', 'conditional', 'proceed', 'watch'].includes(verdict)) {
-    verdict = 'proceed_with_caution'
-  } else if (['fail', 'failed', 'disagree', 'objection', 'reject', 'blocked'].includes(verdict)) verdict = 'objection'
-  else if (record.agree === true || record.passed === true) verdict = 'consensus'
-  else if (record.agree === false || record.passed === false) verdict = 'objection'
-  else verdict = 'unstructured'
-
-  const objections = toStrArray(record.objections)
-  const omissions = toStrArray(record.omissions)
-  const risks = toStrArray(record.risks)
-  const alternatives = toStrArray(record.alternatives)
-  const requiredFixes = toStrArray(record.required_fixes ?? record.requiredFixes)
-  const evidence = toStrArray(record.evidence)
-  // Supervision + guidance output. These are advisory: they never block a step,
-  // but they are surfaced back to the main agent so it keeps them in view.
-  const guidance = toStrArray(record.guidance ?? record.direction)
-  const focusNext = toStrArray(record.focus_next ?? record.focusNext)
-  const watchpoints = toStrArray(record.watchpoints ?? record.watch)
-  const summary =
-    (typeof record.summary === 'string' && record.summary.trim()) ||
-    (typeof record.reasoning === 'string' && record.reasoning.trim()) ||
-    (typeof record.comment === 'string' && record.comment.trim()) ||
-    (verdict === 'unstructured'
-      ? `复核者返回了非结构化结论，按未达成共识处理。原文：${truncate(rawText, 1200)}`
-      : verdict === 'consensus'
-        ? '复核者未发现实质性反对意见。'
-        : verdict === 'proceed_with_caution'
-          ? '复核者允许继续，但要求主代理盯住若干风险点。'
-          : '复核者提出了反对意见。')
-
-  // Only a real blocker blocks. Warnings and suggestions are guidance, not gates:
-  // treating every remark as an objection is what made this mode feel slow.
-  const blocking = objections.length + requiredFixes.length
-  if (verdict === 'consensus' && blocking > 0) verdict = 'objection'
-  if (verdict === 'proceed_with_caution' && blocking > 0) verdict = 'objection'
-
+// Structured output is requested from the child through `outputSchema`, so the
+// normalizers only have to cope with a legacy/text fallback. The child-facing
+// schemas omit plugin-owned bookkeeping fields (model label, raw text), and the
+// tool-facing schemas add them back.
+function withToolFields(childSchema, extraProperties, extraRequired = []) {
   return {
-    verdict,
-    summary: truncate(summary, 2000),
-    objections,
-    omissions,
-    risks,
-    alternatives,
-    guidance,
-    focus_next: focusNext,
-    watchpoints,
-    required_fixes: requiredFixes,
-    evidence,
-    reviewer_model: modelLabel,
-    raw: truncate(rawText, 12000),
+    ...childSchema,
+    properties: { ...childSchema.properties, ...extraProperties },
+    required: [...(childSchema.required ?? []), ...extraRequired],
   }
 }
 
-function normalizeArbitration(parsed, rawText, modelLabel) {
-  const record = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-  let ruling = typeof record.ruling === 'string' ? record.ruling.toLowerCase() : ''
-  if (['uphold_main', 'main', 'allow', 'approve', 'approved'].includes(ruling)) ruling = 'uphold_main'
-  else if (['uphold_reviewer', 'reviewer', 'block', 'reject', 'rejected'].includes(ruling)) ruling = 'uphold_reviewer'
-  else if (['modified', 'modify', 'revise', 'revised'].includes(ruling)) ruling = 'modified'
-  else if (['need_more_evidence', 'insufficient', 'more_evidence'].includes(ruling)) ruling = 'need_more_evidence'
-  else ruling = 'unstructured'
-
-  const requiredActions = toStrArray(record.required_actions ?? record.requiredActions)
-  const decision =
-    (typeof record.decision === 'string' && record.decision.trim()) ||
-    (typeof record.summary === 'string' && record.summary.trim()) ||
-    (typeof record.reasoning === 'string' && record.reasoning.trim()) ||
-    (ruling === 'unstructured'
-      ? `裁决者返回了非结构化结论。原文：${truncate(rawText, 1200)}`
-      : '裁决完成。')
-
-  return {
-    ruling,
-    decision: truncate(decision, 2000),
-    reasoning: truncate(
-      (typeof record.reasoning === 'string' && record.reasoning.trim()) || '',
-      4000,
-    ),
-    required_actions: requiredActions,
-    arbiter_model: modelLabel,
-    raw: truncate(rawText, 12000),
-  }
+const BRIEF_CHILD_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    goal: { type: 'string', description: '一句话目标' },
+    in_scope: { type: 'array', items: { type: 'string' } },
+    out_of_scope: { type: 'array', items: { type: 'string' } },
+    acceptance_criteria: {
+      type: 'array',
+      items: { type: 'string' },
+      description: '可观察、可验证的验收标准；不要写"体验良好"这类无法检验的条目',
+    },
+    assumptions: { type: 'array', items: { type: 'string' } },
+    open_questions: { type: 'array', items: { type: 'string' } },
+    risks: { type: 'array', items: { type: 'string' } },
+    suggested_steps: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['goal', 'acceptance_criteria', 'in_scope', 'out_of_scope', 'assumptions', 'open_questions', 'risks', 'suggested_steps'],
 }
 
-function errorReview(message, modelLabel) {
-  return {
-    verdict: 'error',
-    summary: truncate(message, 2000),
-    guidance: [],
-    focus_next: [],
-    watchpoints: [],
-    objections: [],
-    omissions: [],
-    risks: [],
-    alternatives: [],
-    required_fixes: [],
-    evidence: [],
-    reviewer_model: modelLabel,
-    raw: '',
-  }
+const BRIEF_TOOL_SCHEMA = withToolFields(
+  BRIEF_CHILD_SCHEMA,
+  {
+    acceptance_criteria: { type: 'array', items: { type: 'string' } },
+    arbiter_model: { type: 'string' },
+    raw: { type: 'string' },
+  },
+  ['arbiter_model'],
+)
+
+const FINAL_CHILD_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    ruling: {
+      type: 'string',
+      enum: ['ready', 'not_ready', 'need_more_evidence'],
+      description: 'ready=可交付；not_ready=有验收标准 fail；need_more_evidence=关键项无法验证',
+    },
+    summary: { type: 'string' },
+    criteria: {
+      type: 'array',
+      description: '逐条对应验收标准；每条给出 pass / fail / unverified 与依据',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          item: { type: 'string' },
+          status: { type: 'string', enum: ['pass', 'fail', 'unverified'] },
+          evidence: { type: 'string' },
+        },
+        required: ['item', 'status', 'evidence'],
+      },
+    },
+    blocking_issues: { type: 'array', items: { type: 'string' } },
+    required_actions: { type: 'array', items: { type: 'string' } },
+    reasoning: { type: 'string' },
+  },
+  required: ['ruling', 'summary', 'criteria', 'blocking_issues', 'required_actions', 'reasoning'],
 }
 
-function errorArbitration(message, modelLabel) {
-  return {
-    ruling: 'error',
-    decision: truncate(message, 2000),
-    reasoning: '',
-    required_actions: [],
-    arbiter_model: modelLabel,
-    raw: '',
-  }
-}
-
-function checklistFor(category, role) {
-  const byCategory = {
-    plan: [
-      '目标是否被准确理解？成功标准是否可验证？',
-      '是否存在更短、更直接、依赖更少的路线？是否在绕路？',
-      '是否遗漏了关键约束、边界条件、回滚方案或依赖顺序？',
-      '计划中哪些结论只是假设，尚未用仓库/文档/网页证据证明？',
-    ],
-    command: [
-      '命令的原文、工作目录、参数与副作用是否明确？',
-      '是否可能删除/覆盖/提交/推送/安装/联网或改变用户环境？是否可逆？',
-      '是否能用只读命令或更小范围的检查替代？',
-      '失败时会发生什么？是否有回滚或恢复路径？',
-    ],
-    requirements: [
-      '需求是否完整、无歧义、无内部矛盾？隐含假设是什么？',
-      '是否把用户没说的东西当成了需求？是否遗漏非功能需求？',
-      '验收标准是否可测试、可观察？',
-      '范围边界与不做的事情是否说清楚？',
-    ],
-    frontend: [
-      '页面是否美观、简洁、层次清晰？留白、字体、间距、颜色是否协调一致？',
-      '信息架构是否合理？用户的主要任务是否一眼可见？',
-      '响应式、可访问性（对比度、键盘、语义）、空状态、加载态、错误态是否覆盖？',
-      '是否存在过度设计、装饰堆砌、组件不一致或交互细节缺失？',
-    ],
-    backend: [
-      '接口/数据模型是否一致？错误处理、并发、幂等、事务、资源释放是否考虑？',
-      '安全边界、输入校验、权限、敏感信息、注入风险是否覆盖？',
-      '性能与容量是否存在明显瓶颈？日志与可观测性是否足够？',
-      '是否有未处理的失败路径或向后兼容问题？',
-    ],
-    test: [
-      '测试是否真的覆盖了变更点与关键边界？是否存在假阳性/假阴性？',
-      '测试是否只验证实现细节而没有验证用户行为？',
-      '是否有未测试的错误路径、并发路径、回归风险？',
-      '“通过”的证据是什么？命令、输出、环境是否可复现？',
-    ],
-    document: [
-      '文档内容与代码/配置/实际行为是否一致？',
-      '是否有过时示例、错误命令、缺失前置条件或误导性描述？',
-      '术语、结构、可读性是否适合目标读者？',
-    ],
-    user_choice: [
-      '问题是否真的需要用户决定，而不是可以通过检查得到答案？',
-      '每个选项是否具体、互斥、可执行？是否存在伪二选一？',
-      '是否遗漏了选项之外的更好方案、维持现状或暂缓决定？',
-      '推荐项的理由是否成立？问题的措辞是否诱导？',
-    ],
-    final: [
-      '所有声称“完成/通过/修复/已交付”的点是否有可复现证据？',
-      '是否仍有未运行的测试、未检查的文件、未处理的警告或已知限制？',
-      '交付物是否真实存在、路径正确、内容与声明一致？',
-      '是否存在把“打勾”当成证据、把部分完成说成全部完成的情况？',
-    ],
-    other: [
-      '结论的事实依据是什么？哪些是假设？',
-      '是否存在遗漏、绕路、错误或过度自信？',
-      '下一步最小可验证动作是什么？',
-    ],
-  }
-  const items = byCategory[category] ?? byCategory.other
-  const roleLine = role ? `本次审查角色：${role}\n` : ''
-  return `${roleLine}请逐项检查：\n${bulletList(items)}`
-}
-
-function buildReviewPrompt(args) {
-  const category = typeof args.category === 'string' ? args.category : 'other'
-  const options = Array.isArray(args.options) ? args.options.filter((item) => typeof item === 'string') : []
-  return `你是「复核者」（supervisor）。你在过程中的角色是**监督 + 引导**，不是拦路审批。
-
-主代理当前所处的步骤或决定（下面是显式材料与系统自动附带的主会话摘要；你看不到主代理的实时对话）：
----BEGIN SUBJECT---
-${args.subject}
----END SUBJECT---
-
-审查类别：${category}
-${checklistFor(category, args.role)}
-${options.length > 0 ? `\n主代理准备让用户选择的选项（请检查选项本身是否成立，并补充选项之外的替代方案）：\n${bulletList(options)}` : ''}
-${args.context ? `\n主代理补充的上下文：\n${args.context}` : ''}
-${args.evidence ? `\n主代理声称已经完成的验证：\n${args.evidence}` : ''}
-${renderFiles(args.files)}
-
-你的职责分三层，按重要性排序：
-1. **引导（guidance）**：告诉主代理下一步最该做什么、最省力的正确路径是什么、有哪些现成的东西可以直接用而不必重造。这是你最有价值的输出。
-2. **监督（watchpoints）**：指出这条路上最容易翻车的点，让主代理在过程中自己盯住，而不是等出错再返工。
-3. **拦截（objections）**：只在**会导致返工、数据损坏、安全风险、或明显与用户目标相反**时才提出。措辞偏好、可优化但非必须、锦上添花的建议一律放进 guidance，不要放这里。
-
-判定规则（很重要，不要过度拦截）：
-- consensus：步骤可行，没有阻塞问题。即使你有改进建议也用这个，建议写进 guidance。
-- proceed_with_caution：可以做，但存在需要盯住的风险。把风险写进 watchpoints。
-- objection：**仅当**继续下去一定会出错或造成不可逆后果时才用。此时必须在 objections 里写清"会发生什么"。
-
-工作要求：
-1. 能验证的独立验证：用 read/glob/grep 看真实代码与文件；只读命令或测试可以跑，但绝对不要修改任何文件、不要安装依赖、不要执行有副作用的命令。
-2. 不要为了显得严格而编造问题；也不要因为"看起来差不多"就放过真实缺陷。
-3. 如果某项关键事实你无法验证，写进 watchpoints 提醒主代理自己补证据，而不是直接判 objection。
-4. 最后只输出一个 JSON 对象，不要 Markdown 代码围栏，不要 JSON 之外的文字：
-{"verdict":"consensus|proceed_with_caution|objection","summary":"一句话结论","guidance":["下一步该做什么、更省力的路径"],"focus_next":["接下来最该优先处理的事项"],"watchpoints":["过程中要盯住的风险点"],"objections":["仅限会导致返工/损坏/安全问题的阻塞项"],"risks":["..."],"alternatives":["..."],"required_fixes":["仅限 objection 时必须先修的项"],"evidence":["你实际验证了什么，结论是什么"]}`
-}
-
-function buildArbitrationPrompt(args) {
-  return `你是「裁决者」（arbiter）。主代理与复核者无法达成共识，现在由你做最终裁决。你必须独立验证，而不是简单支持任何一方。
-
-步骤/决策：
----BEGIN SUBJECT---
-${args.subject}
----END SUBJECT---
-
-主代理立场：
-${args.main_position}
-
-复核者立场：
-${args.reviewer_position}
-
-${args.context ? `补充上下文：\n${args.context}\n` : ''}
-${args.evidence ? `已有证据：\n${args.evidence}\n` : ''}
-裁决规则：
-1. 用你被授予的工具独立核查关键事实（网页、文件、只读命令/测试）；不要修改任何文件。
-2. 判断主代理是否可以按原方案继续，还是必须采纳复核者意见/修改方案，还是证据不足需要补充。
-3. 你的裁决是最终结果，主代理必须执行 required_actions。
-4. 最后只输出一个 JSON 对象，不要输出 Markdown 代码围栏，不要输出 JSON 之外的文字：
-{"ruling":"uphold_main|uphold_reviewer|modified|need_more_evidence","decision":"最终决定","reasoning":"裁决理由","required_actions":["主代理必须执行的动作"]}`
-}
+const FINAL_TOOL_SCHEMA = withToolFields(
+  FINAL_CHILD_SCHEMA,
+  {
+    arbiter_model: { type: 'string' },
+    raw: { type: 'string' },
+  },
+  ['arbiter_model'],
+)
 
 function buildBriefPrompt(args) {
   return `你是「裁决者」（arbiter），本次担任**需求解析**。主代理还没开工，你先把需求整理成可执行、可验收的规格，避免主代理理解偏差后返工。
@@ -419,8 +265,7 @@ ${renderFiles(args.files)}
 2. 只做需求解析，不要开始实现，不要修改任何文件。
 3. 明确指出需求中模糊、矛盾、缺失的地方：能合理推断的写进 assumptions，不能推断的写进 open_questions。
 4. 验收标准必须可观察、可验证，不要写"体验良好"这类无法检验的条目。
-5. 最后只输出一个 JSON 对象，不要 Markdown 代码围栏，不要 JSON 之外的文字：
-{"goal":"一句话目标","in_scope":["必须做的"],"out_of_scope":["明确不做的"],"acceptance_criteria":["可验证的验收标准"],"assumptions":["你做的合理推断"],"open_questions":["必须问用户才能确定的"],"risks":["主要风险"],"suggested_steps":["建议的执行顺序"]}`
+5. 用给定的结构化结果字段返回结论。`
 }
 
 function buildFinalAuditPrompt(args) {
@@ -441,9 +286,8 @@ ${args.context ? `补充上下文：\n${args.context}\n` : ''}
 1. **必须自己验证**，不要相信主代理的声明。用 read/glob/grep 检查真实文件；只读命令或测试可以跑；不要修改任何文件。
 2. 逐条核对验收标准，每条给出 pass / fail / unverified 与依据。
 3. 特别检查这些常见虚假完成：声称改了但文件没变、声称测试通过但没有输出、只做了一部分却说全部完成、把"能编译"当成"功能正确"、留下未处理的警告或 TODO 却报告已完成。
-4. 只要有任何一条验收标准 fail 或关键项 unverified，就返回 not_ready。
-5. 最后只输出一个 JSON 对象，不要 Markdown 代码围栏，不要 JSON 之外的文字：
-{"ruling":"ready|not_ready|need_more_evidence","summary":"一句话结论","criteria":[{"item":"验收标准原文","status":"pass|fail|unverified","evidence":"你验证了什么"}],"blocking_issues":["必须修完才能交付的"],"required_actions":["主代理接下来必须做的"],"reasoning":"审核理由"}`
+4. 有验收标准 fail 时返回 not_ready；关键项无法验证时返回 need_more_evidence——两者都不要返回 ready。
+5. 用给定的结构化结果字段返回结论。`
 }
 
 function renderFiles(files) {
@@ -452,9 +296,92 @@ function renderFiles(files) {
   return `相关文件/目录（请用 read/glob/grep 自行核对，不要凭空假设）：\n${list.map((item) => `- ${item}`).join('\n')}\n`
 }
 
+function extractBlockText(message) {
+  if (message === null || typeof message !== 'object') return ''
+  if (!Array.isArray(message.content)) return ''
+  return message.content
+    .filter((block) => block !== null && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text)
+    .join(' ')
+    .trim()
+}
+
+/**
+ * Turn the raw session log into objective facts about what the session actually
+ * did. The child cannot see the caller's conversation, and the caller's own
+ * delivery claim is exactly the thing under audit — so the plugin supplies the
+ * tool-call trace instead of trusting either side.
+ */
+function summarizeToolFacts(events) {
+  const calls = new Map()
+  const failed = []
+  for (const event of events ?? []) {
+    if (event?.type === 'tool/call') {
+      const data = event.data ?? {}
+      calls.set(data.callId, { name: String(data.name ?? ''), args: safeJsonParse(data.arguments) })
+    } else if (event?.type === 'tool/result') {
+      const data = event.data ?? {}
+      const callId = data.message?.source?.callId
+      const call = calls.get(callId)
+      if (call === undefined) continue
+      call.isError = data.message?.isError === true
+      if (call.isError) {
+        const reason =
+          (typeof data.error?.reason === 'string' && data.error.reason) ||
+          (typeof data.error?.code === 'string' && data.error.code) ||
+          extractBlockText(data.message) ||
+          '（无错误详情）'
+        failed.push(`${call.name}: ${truncate(String(reason), 200)}`)
+      }
+    }
+  }
+
+  const writes = []
+  const seenWrite = new Set()
+  const shells = []
+  for (const call of calls.values()) {
+    if (WRITE_TOOLS.has(call.name)) {
+      const candidate = [call.args?.file_path, call.args?.path, call.args?.filename].find(
+        (value) => typeof value === 'string' && value.trim() !== '',
+      )
+      const label = `${call.name} → ${candidate ?? '（未记录路径）'}${call.isError ? '（失败）' : ''}`
+      if (seenWrite.has(label)) continue
+      seenWrite.add(label)
+      writes.push(label)
+    } else if (SHELL_TOOLS.has(call.name)) {
+      const command = call.args?.command ?? call.args?.script ?? call.args?.cmd
+      shells.push(
+        `${call.name}${call.isError ? '（失败）' : ''}: ${truncate(String(command ?? '（未记录命令）'), 240)}`,
+      )
+    }
+  }
+
+  return {
+    writes: writes.slice(-25),
+    shells: shells.slice(-10),
+    failed: failed.slice(-8),
+    total: calls.size,
+  }
+}
+
+function renderToolFacts(facts) {
+  const lines = ['===== 客观事实：本会话已记录的工具调用（系统从会话日志提取，主代理无法改写）=====']
+  if (facts.total === 0) {
+    lines.push('本会话尚未记录任何工具调用。如果交付声明里包含"改了文件/跑了测试"，那它与日志不符。')
+  } else {
+    lines.push(`共 ${facts.total} 次工具调用。`)
+    lines.push(`写操作（最后 ${facts.writes.length} 条去重记录）：\n${bulletList(facts.writes)}`)
+    lines.push(`命令（最后 ${facts.shells.length} 条）：\n${bulletList(facts.shells)}`)
+    if (facts.failed.length > 0) lines.push(`失败的调用（最后 ${facts.failed.length} 条）：\n${bulletList(facts.failed)}`)
+  }
+  lines.push('===== 客观事实结束 =====')
+  return lines.join('\n')
+}
+
 async function collectSessionContext(ctx, exec) {
   const parts = []
   const imageRefs = []
+  let toolFactsText = ''
   let cwd = ''
   try {
     const wd = ctx.get('workingDirectory')
@@ -479,8 +406,14 @@ async function collectSessionContext(ctx, exec) {
       typeof sessionId === 'string' &&
       sessionId.length > 0
     ) {
-      const messages = await query.inspectSession(sessionId, (session) =>
-        session.deriveMessages().map((message) => ({
+      let facts
+      const messages = await query.inspectSession(sessionId, (session) => {
+        try {
+          facts = summarizeToolFacts(session.snapshotEvents())
+        } catch {
+          facts = undefined
+        }
+        return session.deriveMessages().map((message) => ({
           role: message.role,
           text: Array.isArray(message.content)
             ? message.content
@@ -501,10 +434,16 @@ async function collectSessionContext(ctx, exec) {
                 .join('\n')
             : '',
           images: Array.isArray(message.content)
-            ? message.content.filter((block) => block !== null && typeof block === 'object' && block.type === 'image' && block.attachment).map((block) => block.attachment)
+            ? message.content
+                .filter(
+                  (block) =>
+                    block !== null && typeof block === 'object' && block.type === 'image' && block.attachment,
+                )
+                .map((block) => block.attachment)
             : [],
-        })),
-      )
+        }))
+      })
+      if (facts !== undefined) toolFactsText = truncate(renderToolFacts(facts), 6000)
       const relevant = (Array.isArray(messages) ? messages : [])
         .filter(
           (message) =>
@@ -542,17 +481,29 @@ async function collectSessionContext(ctx, exec) {
           if (imageRefs.length < 6) imageRefs.push(ref)
           const label = ref.name ? `（${ref.name}）` : ''
           const size = ref.width && ref.height ? ` ${ref.width}x${ref.height}` : ''
-          imageLines.push(`- 图片${imageRefs.length}${label}${size}${typeof hostPath === 'string' && hostPath.length > 0 ? `：${hostPath}` : ''}`)
+          imageLines.push(
+            `- 图片${imageRefs.length}${label}${size}${
+              typeof hostPath === 'string' && hostPath.length > 0 ? `：${hostPath}` : ''
+            }`,
+          )
         }
       }
       if (imageLines.length > 0) {
-        parts.push(`主会话最近图片（已随本次调用转交，可直接查看；如仍需本机文件可用 read_image 读取下列路径）：\n${imageLines.join('\n')}`)
+        parts.push(
+          `主会话最近图片（已随本次调用转交，可直接查看；如仍需本机文件可用 read_image 读取下列路径）：\n${imageLines.join('\n')}`,
+        )
       }
     }
   } catch {
     // conversation digest and image forwarding are best effort
   }
-  const text = parts.length === 0 ? '' : `\n\n===== 主会话自动上下文（系统只读附带；用于定位资源，最终以你实际读到的文件为准）=====\n${parts.join('\n\n')}\n===== 自动上下文结束 =====`
+  const body = parts.length === 0 ? '' : parts.join('\n\n')
+  const text =
+    body === '' && toolFactsText === ''
+      ? ''
+      : `\n\n===== 主会话自动上下文（系统只读附带；用于定位资源，最终以你实际读到的文件为准）=====\n${body}${
+          toolFactsText === '' ? '' : `\n\n${toolFactsText}`
+        }\n===== 自动上下文结束 =====`
   return { text, images: imageRefs }
 }
 
@@ -564,7 +515,11 @@ function abortError(signal) {
   return error
 }
 
-async function runChild(ctx, exec, preset, route, prompt, label, timeoutMs) {
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function runChild(ctx, exec, preset, route, prompt, label, timeoutMs, options = {}) {
   const subagents = ctx.get('subagents')
   if (subagents === undefined || typeof subagents.startActivation !== 'function') {
     throw new Error('交叉复核模式需要 subagents 服务，但当前组合没有挂载该服务')
@@ -572,6 +527,9 @@ async function runChild(ctx, exec, preset, route, prompt, label, timeoutMs) {
   if (exec.agent === undefined) {
     throw new Error('交叉复核模式工具必须由 Agent 调用（exec.agent 缺失）')
   }
+  // Never start a child for a call the user already cancelled: the activation
+  // would begin work that nothing can consume.
+  if (exec.signal?.aborted) throw abortError(exec.signal)
   // The DSH subagent runtime expects a FLAT activation spec: `parent`, `prompt`,
   // `agentPreset` and `agentOptions` are top-level fields, not a nested `request`
   // object. Passing them nested leaves `spec.parent` undefined, and the runtime
@@ -603,6 +561,9 @@ async function runChild(ctx, exec, preset, route, prompt, label, timeoutMs) {
     parent: exec.agent,
     agentPreset: preset,
     agentOptions: childAgentOptions,
+    // Ask the child to submit a validated object instead of asking it in prose to
+    // "output only JSON": the runtime owns validation and the terminal guard.
+    ...(options.outputSchema === undefined ? {} : { outputSchema: options.outputSchema }),
     signal: exec.signal,
     delivery: 'caller',
   })
@@ -647,305 +608,95 @@ async function runChild(ctx, exec, preset, route, prompt, label, timeoutMs) {
   }
 }
 
-function rememberReview(sessionId, args, uses) {
-  const explicit = toStrArray(args.target_tools)
-  const categoryTargets = TARGETS_BY_CATEGORY[args.category]
-  const targets =
-    explicit.length > 0
-      ? new Set(explicit)
-      : Array.isArray(categoryTargets) && categoryTargets.length > 0
-        ? new Set(categoryTargets)
-        : null
-  reviews.set(sessionId, { targets, at: Date.now(), remaining: uses })
+function isAbortError(error) {
+  return error?.name === 'AbortError'
 }
 
-function forgetReview(sessionId) {
-  reviews.delete(sessionId)
-}
-
-function guardBlockMessage(toolName) {
-  return (
-    `交叉复核模式（Cross-Verification Mode）拦截：调用 \`${toolName}\` 之前必须先完成一次针对该动作的 \`cross_review\`。` +
-    `请把即将执行的完整内容放进 subject，并在 target_tools 中包含 "${toolName}"；只有 verdict 为 consensus 后才能重试该动作。`
-  )
-}
-
-function installGuard(ctx, config) {
-  if (config.enforceGuard === false) return
-  ctx.tools.guard((exec) => {
-    const toolName = typeof exec.name === 'string' ? exec.name : ''
-    if (!ENFORCED_TOOLS.has(toolName)) return undefined
-    const sessionId = exec.agent?.session?.id
-    if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
-    const record = reviews.get(sessionId)
-    if (record === undefined || Date.now() - record.at > REVIEW_TTL_MS) {
-      if (record !== undefined) reviews.delete(sessionId)
-      return guardBlockMessage(toolName)
+/**
+ * One bounded retry for infrastructure failures. A cancellation or timeout is
+ * never retried: the user asked to stop, or the budget is already spent. A
+ * provider error is retried once because a single 429 or dropped socket used to
+ * destroy the whole audit.
+ */
+async function runChildWithRetry(ctx, exec, preset, route, prompt, label, timeoutMs, options = {}) {
+  let lastError
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt > 0) {
+      if (exec.signal?.aborted) throw abortError(exec.signal)
+      await delay(RETRY_DELAY_MS)
     }
-    if (record.targets !== null && !record.targets.has(toolName)) {
-      return `交叉复核模式（Cross-Verification Mode）拦截：最近的 cross_review 没有授权 \`${toolName}\`。请针对该动作重新审查，并在 target_tools 中包含 "${toolName}"。`
+    try {
+      const outcome = await runChild(ctx, exec, preset, route, prompt, label, timeoutMs, options)
+      // A child that stopped with `error` after publishing produced no verdict.
+      // Retrying once is the difference between "the model is down" and "this
+      // task cannot be reviewed".
+      if (outcome.result?.stopReason === 'error' && attempt === 0) {
+        lastError = new Error(
+          `子代理执行失败（stopReason=error）${typeof outcome.result?.diagnostic === 'string' ? `：${outcome.result.diagnostic}` : ''}`,
+        )
+        continue
+      }
+      return outcome
+    } catch (error) {
+      if (isAbortError(error) || error?.name === 'TimeoutError') throw error
+      lastError = error
+      const message = error instanceof Error ? error.message : String(error)
+      if (attempt === 0 && RETRYABLE_ERROR.test(message)) continue
+      throw error
     }
-    record.remaining -= 1
-    if (record.remaining <= 0) reviews.delete(sessionId)
-    return undefined
+  }
+  throw lastError ?? new Error('交叉复核子代理多次失败')
+}
+
+function structuredOf(result) {
+  const value = result?.structured
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : undefined
+}
+
+function stopReasonFailure(result) {
+  if (result?.stopReason === undefined || result.stopReason === 'completed') return undefined
+  const diagnostic = typeof result.diagnostic === 'string' ? `：${result.diagnostic}` : ''
+  return `子代理未正常完成（stopReason=${result.stopReason}）${diagnostic}`
+}
+
+function briefKey(exec) {
+  const sessionId = exec?.agent?.session?.id
+  return typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined
+}
+
+function rememberBrief(exec, value, args) {
+  const key = briefKey(exec)
+  if (key === undefined) return
+  briefs.set(key, {
+    goal: value.goal,
+    in_scope: value.in_scope,
+    out_of_scope: value.out_of_scope,
+    acceptance_criteria: value.acceptance_criteria,
+    files: toStrArray(args.files),
+    at: Date.now(),
   })
 }
 
-function makeReviewTool(ctx, config, getRoutes) {
-  return {
-    name: 'cross_review',
-    description:
-      '交叉复核模式的核心工具：把当前步骤/决策/命令/交付物/用户问题交给一个独立的「复核者」子代理审查。' +
-      '复核者使用独立模型（默认 Hy4.WorkBuddy），可联网搜索、读取文件并运行只读验证；它看不到本会话，所以 subject 必须自包含。' +
-      '返回 verdict=consensus 才可继续；objection 时按 required_fixes 修改后复审；error/unstructured 视为未通过。' +
-      '每个写操作、危险命令、用户提问和完成声明都必须先审核。请把涉及的工作区文件/目录路径填进 files。',
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        subject: {
-          type: 'string',
-          description: '被审查步骤的自包含描述：目标、当前方案或命令原文、相关文件路径、已有证据与假设。',
-        },
-        category: {
-          type: 'string',
-          enum: ['plan', 'command', 'requirements', 'frontend', 'backend', 'test', 'document', 'user_choice', 'final', 'other'],
-          description: '审查类别；决定复核者使用的检查清单。',
-        },
-        role: {
-          type: 'string',
-          description: '可选：被审查的角色，例如 leader、需求分析、前端开发、后端开发、测试、交付。',
-        },
-        context: {
-          type: 'string',
-          description: '可选：补充上下文、约束、用户原话、已尝试过的做法。',
-        },
-        options: {
-          type: 'array',
-          items: { type: 'string' },
-          description: '当 category=user_choice 时，主代理准备展示给用户的全部选项原文。',
-        },
-        evidence: {
-          type: 'string',
-          description: '可选：主代理已经完成的验证（命令、测试、阅读、URL）。',
-        },
-        files: {
-          type: 'array',
-          items: { type: 'string' },
-          description: '本次审查涉及的工作区文件/目录路径。子代理看不到你的实时对话，会按这些路径用 read/glob/grep 自行核对；强烈建议填写。',
-        },
-        target_tools: {
-          type: 'array',
-          items: { type: 'string' },
-          description: '本次审查拟授权的工具名列表，例如 ["write"] 或 ["pwsh"]；建议填写，便于执行守卫逐个消耗。',
-        },
-      },
-      required: ['subject', 'category'],
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          verdict: {
-            type: 'string',
-            enum: ['consensus', 'proceed_with_caution', 'objection', 'error', 'unstructured'],
-          },
-          summary: { type: 'string' },
-          guidance: { type: 'array', items: { type: 'string' } },
-          focus_next: { type: 'array', items: { type: 'string' } },
-          watchpoints: { type: 'array', items: { type: 'string' } },
-          objections: { type: 'array', items: { type: 'string' } },
-          omissions: { type: 'array', items: { type: 'string' } },
-          risks: { type: 'array', items: { type: 'string' } },
-          alternatives: { type: 'array', items: { type: 'string' } },
-          required_fixes: { type: 'array', items: { type: 'string' } },
-          evidence: { type: 'array', items: { type: 'string' } },
-          reviewer_model: { type: 'string' },
-          raw: { type: 'string' },
-        },
-        required: [
-          'verdict',
-          'summary',
-          'guidance',
-          'focus_next',
-          'watchpoints',
-          'objections',
-          'omissions',
-          'risks',
-          'alternatives',
-          'required_fixes',
-          'evidence',
-          'reviewer_model',
-        ],
-      },
-      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
-    },
-    isConcurrencySafe: () => false,
-    async execute(args, exec) {
-      const routes = getRoutes()
-      const modelLabel = routeLabel(routes.reviewer)
-      const sessionId = exec.agent?.session?.id
-      if (typeof sessionId === 'string' && sessionId.length > 0) forgetReview(sessionId)
-
-      // A disabled reviewer must not spawn a child, and must not become a silent
-      // gate either: it authorizes the guarded call and says so explicitly.
-      if (routes.reviewer.enabled === false) {
-        if (
-          config.enforceGuard !== false &&
-          typeof sessionId === 'string' &&
-          sessionId.length > 0
-        ) {
-          rememberReview(sessionId, args, config.reviewUses)
-        }
-        return {
-          verdict: 'consensus',
-          summary: '复核者已在设置中停用，本次直接放行（未启动子代理）。',
-          guidance: [],
-          focus_next: [],
-          watchpoints: [],
-          objections: [],
-          omissions: [],
-          risks: [],
-          alternatives: [],
-          required_fixes: [],
-          evidence: [],
-          reviewer_model: '',
-          raw: '',
-        }
-      }
-
-      try {
-        const prompt = buildReviewPrompt(args)
-        const { result } = await runChild(
-          ctx,
-          exec,
-          'cross-review-internal',
-          routes.reviewer,
-          prompt,
-          '交叉复核',
-          routeTimeout(routes.reviewer, config.reviewTimeoutMs),
-        )
-        const rawText = extractText(result)
-        if (result?.stopReason !== undefined && result.stopReason !== 'completed') {
-          const diagnostic = typeof result.diagnostic === 'string' ? `：${result.diagnostic}` : ''
-          return errorReview(`复核子代理未正常完成（stopReason=${result.stopReason}）${diagnostic}`, modelLabel)
-        }
-        const parsed = parseJsonLoose(rawText)
-        const normalized = normalizeReview(parsed, rawText, modelLabel)
-        // Both outcomes authorize the guarded call: `proceed_with_caution`
-        // carries supervision notes, not a blocker. Only `objection` refuses.
-        if (
-          config.enforceGuard !== false &&
-          (normalized.verdict === 'consensus' || normalized.verdict === 'proceed_with_caution') &&
-          typeof sessionId === 'string' &&
-          sessionId.length > 0
-        ) {
-          rememberReview(sessionId, args, config.reviewUses)
-        }
-        return normalized
-      } catch (error) {
-        return errorReview(
-          `无法完成交叉复核：${error instanceof Error ? error.message : String(error)}`,
-          modelLabel,
-        )
-      }
-    },
+function readBrief(exec) {
+  const key = briefKey(exec)
+  if (key === undefined) return undefined
+  const record = briefs.get(key)
+  if (record === undefined) return undefined
+  if (Date.now() - record.at > BRIEF_TTL_MS) {
+    briefs.delete(key)
+    return undefined
   }
+  return record
 }
 
-function makeArbitrateTool(ctx, config, getRoutes) {
-  return {
-    name: 'cross_review_arbitrate',
-    description:
-      '当主代理与复核者无法达成共识时调用：把双方立场交给独立「裁决者」子代理，由默认 GPT-6.1 Sol 的模型做最终裁决。' +
-      '裁决结果具有约束力，主代理必须执行 required_actions。只有在前述 cross_review 多轮仍为 objection、或涉及安全/不可逆/重大范围分歧时使用。',
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        subject: {
-          type: 'string',
-          description: '争议所涉步骤/决策的自包含描述。',
-        },
-        main_position: {
-          type: 'string',
-          description: '主代理的立场：主张、依据、已做验证、拟执行动作。',
-        },
-        reviewer_position: {
-          type: 'string',
-          description: '复核者的完整反对意见（可粘贴 cross_review 的 JSON 摘要）。',
-        },
-        context: {
-          type: 'string',
-          description: '可选：补充上下文、约束、用户原话。',
-        },
-        evidence: {
-          type: 'string',
-          description: '可选：双方已收集的证据、命令输出、测试结果、网页来源。',
-        },
-      },
-      required: ['subject', 'main_position', 'reviewer_position'],
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          ruling: {
-            type: 'string',
-            enum: ['uphold_main', 'uphold_reviewer', 'modified', 'need_more_evidence', 'error', 'unstructured'],
-          },
-          decision: { type: 'string' },
-          reasoning: { type: 'string' },
-          required_actions: { type: 'array', items: { type: 'string' } },
-          arbiter_model: { type: 'string' },
-          raw: { type: 'string' },
-        },
-        required: ['ruling', 'decision', 'reasoning', 'required_actions', 'arbiter_model'],
-      },
-      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
-    },
-    isConcurrencySafe: () => false,
-    async execute(args, exec) {
-      const routes = getRoutes()
-      const modelLabel = routeLabel(routes.arbiter)
-      if (routes.arbiter.enabled === false) {
-        return {
-          ruling: 'uphold_main',
-          decision: '裁决者已在设置中停用，按主代理方案继续（未启动子代理）。',
-          reasoning: '',
-          required_actions: [],
-          arbiter_model: '',
-          raw: '',
-        }
-      }
-      try {
-        const prompt = buildArbitrationPrompt(args)
-        const { result } = await runChild(
-          ctx,
-          exec,
-          'cross-review-internal',
-          routes.arbiter,
-          prompt,
-          '交叉复核裁决',
-          routeTimeout(routes.arbiter, config.reviewTimeoutMs),
-        )
-        const rawText = extractText(result)
-        if (result?.stopReason !== undefined && result.stopReason !== 'completed') {
-          const diagnostic = typeof result.diagnostic === 'string' ? `：${result.diagnostic}` : ''
-          return errorArbitration(`裁决子代理未正常完成（stopReason=${result.stopReason}）${diagnostic}`, modelLabel)
-        }
-        const parsed = parseJsonLoose(rawText)
-        return normalizeArbitration(parsed, rawText, modelLabel)
-      } catch (error) {
-        return errorArbitration(
-          `无法完成裁决：${error instanceof Error ? error.message : String(error)}`,
-          modelLabel,
-        )
-      }
-    },
+function renderBriefSpec(brief) {
+  const lines = [`目标：${brief.goal}`]
+  if (brief.acceptance_criteria.length > 0) {
+    lines.push(`验收标准：\n${bulletList(brief.acceptance_criteria)}`)
   }
+  if (brief.in_scope.length > 0) lines.push(`范围内：\n${bulletList(brief.in_scope)}`)
+  if (brief.out_of_scope.length > 0) lines.push(`范围外（不做）：\n${bulletList(brief.out_of_scope)}`)
+  return lines.join('\n')
 }
 
 function normalizeBrief(parsed, rawText, modelLabel) {
@@ -966,6 +717,21 @@ function normalizeBrief(parsed, rawText, modelLabel) {
     suggested_steps: toStrArray(record.suggested_steps ?? record.suggestedSteps),
     arbiter_model: modelLabel,
     raw: truncate(rawText, 12000),
+  }
+}
+
+function errorBrief(message, modelLabel) {
+  return {
+    goal: truncate(message, 1200),
+    in_scope: [],
+    out_of_scope: [],
+    acceptance_criteria: [],
+    assumptions: [],
+    open_questions: [],
+    risks: [],
+    suggested_steps: [],
+    arbiter_model: modelLabel,
+    raw: '',
   }
 }
 
@@ -1023,23 +789,10 @@ function normalizeFinalAudit(parsed, rawText, modelLabel) {
   }
 }
 
-function errorBrief(message, modelLabel) {
-  return {
-    goal: truncate(message, 1200),
-    in_scope: [],
-    out_of_scope: [],
-    acceptance_criteria: [],
-    assumptions: [],
-    open_questions: [],
-    risks: [],
-    suggested_steps: [],
-    arbiter_model: modelLabel,
-    raw: '',
-  }
-}
-
 function errorFinalAudit(message, modelLabel) {
   return {
+    // `error` is a distinct ruling on purpose: the protocol tells the main agent
+    // to disclose the unverified state instead of reading it as a pass.
     ruling: 'error',
     summary: truncate(message, 2000),
     criteria: [],
@@ -1067,42 +820,18 @@ function makeBriefTool(ctx, config, getRoutes) {
         files: {
           type: 'array',
           items: { type: 'string' },
-          description: '本轮涉及的工作区文件/目录路径（相对或绝对均可）。子代理看不到你的实时对话，会按这些路径用 read/glob/grep 自行核对；强烈建议填写用户 @ 引用的文件、待改文件和相关模块。',
+          description:
+            '本轮涉及的工作区文件/目录路径（相对或绝对均可）。子代理看不到你的实时对话，会按这些路径用 read/glob/grep 自行核对；强烈建议填写用户 @ 引用的文件、待改文件和相关模块。',
         },
       },
       required: ['requirement'],
     },
     description:
       '开工前的需求解析（由裁决者执行）：把用户原始需求整理成可执行、可验收的规格，明确范围、验收标准、假设和必须确认的问题。' +
-      '目的是让主代理一开始就理解正确，避免做完才发现方向错、返工重做。任务开始时调用一次即可，不要每步都调用。请把相关工作区文件/目录路径填进 files，子代理会自行核对。',
+      '结果是"可验收"的唯一依据：插件会按会话记住它，交付审核 cross_review_final 会自动复用，你不需要再抄一遍。' +
+      '纯问答、只读检索、单行格式确认这类没有文件改动也没有外部副作用的请求可以跳过；其余任务开始时调用一次即可。',
     output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          goal: { type: 'string' },
-          in_scope: { type: 'array', items: { type: 'string' } },
-          out_of_scope: { type: 'array', items: { type: 'string' } },
-          acceptance_criteria: { type: 'array', items: { type: 'string' } },
-          assumptions: { type: 'array', items: { type: 'string' } },
-          open_questions: { type: 'array', items: { type: 'string' } },
-          risks: { type: 'array', items: { type: 'string' } },
-          suggested_steps: { type: 'array', items: { type: 'string' } },
-          arbiter_model: { type: 'string' },
-          raw: { type: 'string' },
-        },
-        required: [
-          'goal',
-          'in_scope',
-          'out_of_scope',
-          'acceptance_criteria',
-          'assumptions',
-          'open_questions',
-          'risks',
-          'suggested_steps',
-          'arbiter_model',
-        ],
-      },
+      schema: BRIEF_TOOL_SCHEMA,
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
     },
     isConcurrencySafe: () => false,
@@ -1129,21 +858,23 @@ function makeBriefTool(ctx, config, getRoutes) {
         }
       }
       try {
-        const prompt = buildBriefPrompt(args)
-        const { result } = await runChild(
+        const { result } = await runChildWithRetry(
           ctx,
           exec,
           'cross-review-internal',
           routes.arbiter,
-          prompt,
+          buildBriefPrompt(args),
           '需求解析',
           routeTimeout(routes.arbiter, config.reviewTimeoutMs),
+          { outputSchema: BRIEF_CHILD_SCHEMA },
         )
+        const failure = stopReasonFailure(result)
+        if (failure !== undefined) return errorBrief(failure, modelLabel)
         const rawText = extractText(result)
-        if (result?.stopReason !== undefined && result.stopReason !== 'completed') {
-          return errorBrief(`需求解析未正常完成（stopReason=${result.stopReason}）`, modelLabel)
-        }
-        return normalizeBrief(parseJsonLoose(rawText), rawText, modelLabel)
+        const parsed = structuredOf(result) ?? parseJsonLoose(rawText)
+        const brief = normalizeBrief(parsed, rawText, modelLabel)
+        rememberBrief(exec, brief, args)
+        return brief
       } catch (error) {
         return errorBrief(
           `无法完成需求解析：${error instanceof Error ? error.message : String(error)}`,
@@ -1163,7 +894,8 @@ function makeFinalAuditTool(ctx, config, getRoutes) {
       properties: {
         requirement: {
           type: 'string',
-          description: '需求与验收标准原文（可粘贴 cross_review_brief 的 goal + acceptance_criteria）。',
+          description:
+            '可选：需求与验收标准原文。省略时自动使用本会话 cross_review_brief 的结果（推荐，省去抄写且不会被改写）。',
         },
         claim: {
           type: 'string',
@@ -1174,45 +906,19 @@ function makeFinalAuditTool(ctx, config, getRoutes) {
         files: {
           type: 'array',
           items: { type: 'string' },
-          description: '交付审核涉及的工作区文件/目录路径。子代理会按这些路径用 read/glob/grep 自行核对；强烈建议填写改动文件与测试相关文件。',
+          description:
+            '交付审核涉及的工作区文件/目录路径。省略时使用 brief 阶段登记的路径。子代理会按这些路径用 read/glob/grep 自行核对。',
         },
       },
-      required: ['requirement', 'claim'],
+      required: ['claim'],
     },
     description:
       '交付前的终局审核（由裁决者执行）：逐条核对验收标准，自己验证文件与测试，识别"声称完成但实际没做"的情况。' +
-      '返回 ready 才可向用户宣布交付；not_ready 时按 required_actions 修完再审核。任务收尾调用一次，不要每步都调用。请把改动文件与测试相关文件路径填进 files。',
+      '省略 requirement 时会自动复用本会话 cross_review_brief 的验收标准；系统还会额外附带主会话真实的写操作/命令记录，主代理无法改写它。' +
+      '返回 ready 才可向用户宣布交付；not_ready 按 required_actions 修完再审核；need_more_evidence 先补证据；error 表示审核本身没跑成，必须向用户披露"未复核"而不是当作通过。' +
+      '任务收尾调用一次，不要每步都调用。',
     output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          ruling: {
-            type: 'string',
-            enum: ['ready', 'not_ready', 'need_more_evidence', 'error', 'unstructured'],
-          },
-          summary: { type: 'string' },
-          criteria: {
-            type: 'array',
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                item: { type: 'string' },
-                status: { type: 'string', enum: ['pass', 'fail', 'unverified'] },
-                evidence: { type: 'string' },
-              },
-              required: ['item', 'status', 'evidence'],
-            },
-          },
-          blocking_issues: { type: 'array', items: { type: 'string' } },
-          required_actions: { type: 'array', items: { type: 'string' } },
-          reasoning: { type: 'string' },
-          arbiter_model: { type: 'string' },
-          raw: { type: 'string' },
-        },
-        required: ['ruling', 'summary', 'criteria', 'blocking_issues', 'required_actions', 'arbiter_model'],
-      },
+      schema: FINAL_TOOL_SCHEMA,
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
     },
     isConcurrencySafe: () => false,
@@ -1235,22 +941,46 @@ function makeFinalAuditTool(ctx, config, getRoutes) {
           raw: '',
         }
       }
+
+      const explicitRequirement = typeof args.requirement === 'string' ? args.requirement.trim() : ''
+      const brief = readBrief(exec)
+      const requirement = explicitRequirement === '' && brief !== undefined ? renderBriefSpec(brief) : explicitRequirement
+      if (requirement === '') {
+        return {
+          ruling: 'need_more_evidence',
+          summary:
+            '缺少验收标准：本次调用没有 requirement，本会话也没有可复用的 cross_review_brief 结果。请先调用 cross_review_brief，或在 requirement 里写明验收标准。',
+          criteria: [],
+          blocking_issues: [],
+          required_actions: ['调用 cross_review_brief，或在 cross_review_final 的 requirement 中写明验收标准'],
+          reasoning: '',
+          arbiter_model: '',
+          raw: '',
+        }
+      }
+      const briefSection =
+        brief === undefined || explicitRequirement === ''
+          ? ''
+          : `\n\n【系统补充：本会话 cross_review_brief 产出的验收标准（主代理未改写；若与你本次提交的范围不一致，请指出差异并以用户最新意图为准）】\n${renderBriefSpec(brief)}`
+      const files =
+        Array.isArray(args.files) && args.files.length > 0 ? args.files : (brief?.files ?? [])
+
       try {
-        const prompt = buildFinalAuditPrompt(args)
-        const { result } = await runChild(
+        const { result } = await runChildWithRetry(
           ctx,
           exec,
           'cross-review-internal',
           routes.arbiter,
-          prompt,
+          buildFinalAuditPrompt({ ...args, requirement: `${requirement}${briefSection}`, files }),
           '交付审核',
           routeTimeout(routes.arbiter, config.reviewTimeoutMs),
+          { outputSchema: FINAL_CHILD_SCHEMA },
         )
+        const failure = stopReasonFailure(result)
+        if (failure !== undefined) return errorFinalAudit(failure, modelLabel)
         const rawText = extractText(result)
-        if (result?.stopReason !== undefined && result.stopReason !== 'completed') {
-          return errorFinalAudit(`交付审核未正常完成（stopReason=${result.stopReason}）`, modelLabel)
-        }
-        return normalizeFinalAudit(parseJsonLoose(rawText), rawText, modelLabel)
+        const parsed = structuredOf(result) ?? parseJsonLoose(rawText)
+        return normalizeFinalAudit(parsed, rawText, modelLabel)
       } catch (error) {
         return errorFinalAudit(
           `无法完成交付审核：${error instanceof Error ? error.message : String(error)}`,
@@ -1276,26 +1006,30 @@ function buildProtocol(routes) {
 
   return `## 交叉复核模式协议（Cross-Verification Mode）
 
-本模式有两个角色：**裁决者负责开工前解析需求、收尾时审核交付；你（主代理）负责执行与取证。**
+两个角色：**裁决者在首尾判定需求与交付，你（主代理）负责执行与取证。**
 
 ### 角色分工
-- **裁决者**（${routeLabel(routes.arbiter)}）：任务开始时解析需求，任务结束时审核交付。只在首尾各调用一次。
-- **主代理**（你）：按解析出的规格执行，并负责产出**可复现证据**（命令、输出、文件路径）；**验收判定由裁决者完成，你自己不另做一遍验收、也不自行下「通过/不通过」的结论**。
+- **裁决者**（${routeLabel(routes.arbiter)}）：开工前解析需求（cross_review_brief），收尾时审核交付（cross_review_final）。只在首尾各一次。
+- **主代理**（你）：按规格执行，并提供可复现证据（命令、输出、文件路径）；**验收判定由裁决者完成，你不自行下「通过/不通过」的结论**。
 ${statusSection}
-### 任务开始时：调用 cross_review_brief（一次）
+### 任务开始时：cross_review_brief（一次）
 把用户原始需求交给裁决者，得到 goal / 范围 / 验收标准 / 假设 / 待确认问题。
 若 open_questions 里有必须用户决定的事项，先用 ask_user_question 问清楚再开工；其余按 assumptions 推进并在最终回复里说明。
+结果会被本插件按会话记住，收尾审核自动复用，**不需要你抄一遍**。
 
-### 任务结束时：调用 cross_review_final（一次）——唯一的验收关
-这是唯一的验收关，由裁决者判定：把验收标准、你的交付声明、以及**可复现证据**（改了哪些文件、跑了什么命令、关键输出）交给裁决者，它会自己核对文件与测试；你只负责提供证据，不自行下验收结论。
+**轻量豁免**：纯问答、只读检索、单行格式确认这类**没有文件改动、也没有外部副作用**的请求，可以跳过 brief 与 final；此时要在回复里说明「本次未走交叉复核」，不要假装复核过。
+
+### 任务结束时：cross_review_final（一次）——唯一的验收关
+把交付声明与**可复现证据**（改了哪些文件、跑了什么命令、关键输出）交给裁决者。调用时可以不传 requirement，它会自动使用 brief 的验收标准；系统还会附带主会话真实的写操作/命令记录，你无法改写它——所以不要声称做过日志里没有的事。
 - ready：才可以向用户宣布交付。
-- not_ready / need_more_evidence：按 required_actions 修完再审核，不要跳过直接报告完成。
+- not_ready / need_more_evidence：按 required_actions 修完或补证据再审核，不要跳过直接报告完成。
+- error：审核本身没跑成（超时、模型故障、被取消）。**这既不是通过也不是不通过**：要么重试一次，要么在最终回复里明确写出「交付审核未完成，以下为未复核内容」。
 
 ### 行为准则
 - 先证据后结论；不确定就说不确定并补验证。验收判定交给裁决者，你只提供可复现证据（命令 + 输出 + 文件路径），不自行下验收结论。
 - 主会话最近粘贴的图片会自动转交给裁决者（需求解析/交付审核）；视觉核对（配色、布局截图等）可交给 cross_review_final 完成。
-- 调用 cross_review_brief / cross_review_final 时，务必把涉及的工作区文件/目录路径填进 files，把工作目录、附件说明和会话背景填进 context。子代理看不到你的实时对话，只能用你给的材料和系统自动附带的会话摘要；关键资源一定要显式给路径，让它自己用 read/glob/grep 核对。
-- 不要以「只是小改动」跳过交付前的 cross_review_final 审核。
+- 调用上面两个工具时，务必把涉及的工作区文件/目录路径填进 files，把工作目录、附件说明和会话背景填进 context。子代理看不到你的实时对话，只能用你给的材料和系统自动附带的会话摘要与工具调用记录。
+- 不要以「只是小改动」跳过交付前的 cross_review_final 审核（轻量豁免除外）。
 - 最终回复里要写清：做了什么、验证了什么、还有哪些未验证或已知限制。`
 }
 
@@ -1304,17 +1038,16 @@ function liveRoutes(ctx, config) {
   const live = service !== undefined && typeof service.get === 'function' ? service.get() : undefined
   const source = live !== null && typeof live === 'object' ? live : config
   return {
-    reviewer: routeOf(source?.reviewer, DEFAULT_REVIEWER),
     arbiter: routeOf(source?.arbiter, DEFAULT_ARBITER),
   }
 }
 
 export function apply(ctx, config = {}) {
   const policy = {
-    enforceGuard: config?.enforceGuard !== false,
-    reviewUses: Number.isSafeInteger(config?.reviewUses) && config.reviewUses > 0 ? config.reviewUses : 8,
     reviewTimeoutMs:
-      Number.isFinite(config?.reviewTimeoutMs) && config.reviewTimeoutMs > 0 ? config.reviewTimeoutMs : 180000,
+      Number.isFinite(config?.reviewTimeoutMs) && config.reviewTimeoutMs > 0
+        ? config.reviewTimeoutMs
+        : DEFAULT_TIMEOUT_MS,
   }
   const getRoutes = () => liveRoutes(ctx, config)
   ctx.tools.register(makeBriefTool(ctx, policy, getRoutes))
@@ -1328,16 +1061,15 @@ export function apply(ctx, config = {}) {
 
 // Exported for local unit checks; not part of the Cordis contract.
 export {
-  DEFAULT_REVIEWER,
   DEFAULT_ARBITER,
-  buildReviewPrompt,
-  buildArbitrationPrompt,
   buildBriefPrompt,
   buildFinalAuditPrompt,
-  normalizeReview,
-  normalizeArbitration,
+  buildProtocol,
   normalizeBrief,
   normalizeFinalAudit,
+  summarizeToolFacts,
+  renderToolFacts,
+  renderBriefSpec,
   parseJsonLoose,
   routeOf,
   runChild,
