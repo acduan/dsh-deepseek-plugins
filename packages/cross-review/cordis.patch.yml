@@ -37,6 +37,7 @@
                 你是一个 coding agent，运行在 {{model}} 模型上，当前处于「交叉复核模式（Cross-Verification Mode）」。
                 本模式只有一个复核角色：裁决者负责开工前解析需求、收尾时审核交付；你（主代理）负责执行与取证。
                 不要把"看起来做完了"当成完成：改动后由你提供可复现证据（命令 + 输出 + 文件路径），交付验收判定交给裁决者的 cross_review_final 完成；你只负责取证，不自行下验收结论。
+                提交 cross_review_final 前，先按 brief 的每条验收标准（AC1…）逐条备齐「证据位置、验证方法、实际结果、必要执行环境」，并把 open_questions 的用户答复与当前假设写进 context；收到 required_actions 时一次改完再复审，不要逐条挤牙膏。
           - id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
@@ -57,10 +58,32 @@
             name: '@deepseek-ai/dsh-tool-fs-search'
             config:
               sampleOverCapGlobResults: false
+          # The rows below mirror the shipped `standard` preset. This composition
+          # is a copy of it plus the two arbiter tools, so a row dropped here is a
+          # capability silently missing from this mode only. Keep the two lists in
+          # sync when the shipped preset changes.
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: tool-schedule
+            name: '@deepseek-ai/dsh-tool-schedule'
+          # Discover the built-in skills (`dsh-doc`, `office`) that ship inside the
+          # DSH installation. The expression MUST resolve from the installation,
+          # not from this bundle: `createRequire(baseUrl)` resolves relative to the
+          # declaring patch file, and this package lives outside the installation,
+          # so the shipped `standard` preset's expression would throw here and take
+          # the whole preset activation down with it. Desktop publishes the
+          # package.json anchor through profileContext, not DSH_INSTALL_DIR.
           - id: skill-filesystem
             name: '@deepseek-ai/dsh-skill-filesystem'
+            config:
+              customSkillDirs:
+                - !!js "process.getBuiltinModule('node:path').dirname(process.getBuiltinModule('node:module').createRequire(ctx.get('profileContext').installAnchor).resolve('@deepseek-ai/dsh-agent-preset/package.json')) + '/skills'"
           - id: tool-skill
             name: '@deepseek-ai/dsh-tool-skill'
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
           - id: planning
             name: cordis:group
             group: true
@@ -107,6 +130,8 @@
             config:
               - id: tool-subagent-control
                 name: '@deepseek-ai/dsh-tool-subagent-control'
+                config:
+                  interrupt: false
               - id: tool-subagent
                 name: '@deepseek-ai/dsh-tool-subagent'
                 config:
@@ -119,6 +144,12 @@
                 config:
                   provider: fork
                   toolName: subagent_fork
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
           - id: tool-ask-user
             name: '@deepseek-ai/dsh-tool-ask-user'
           - id: tool-todo
@@ -144,10 +175,33 @@
                 timeoutMs: 180000
           - id: present
             name: '@deepseek-ai/dsh-tool-present'
+          - id: tool-office
+            name: '@deepseek-ai/dsh-tool-office'
+          - id: tool-plugin-manager
+            name: '@deepseek-ai/dsh-plugin-manager/tools'
+            disabled: !!js "!ctx.get('profileContext')"
+          - id: tool-plugin-market
+            name: '@deepseek-ai/dsh-plugin-market/tools'
+            disabled: true
 
     # The single internal preset used by the arbiter. Its role is stated by the
     # task prompt; it is not a working mode, and the name says so because the
     # roster cannot hide a declaration.
+    #
+    # Read-only shell (important): turning off `write`/`edit`/`applyPatch` only
+    # removes the file tools. The shell stays, and it does NOT read a
+    # preset-level default mode: `sandboxPolicy.resolve()` is
+    # `request.mode ?? overrideOf(session) ?? defaultMode`, and the subagent
+    # runtime appends the parent's explicit mode onto every child session
+    # (`source: 'delegation'`). A main agent under `danger-full-access` therefore
+    # hands that mode to its arbiter, so declaring `mode: read-only` here would
+    # be dead configuration — verified against this installation, where 91 of 91
+    # recorded child sessions carry an inherited `sandbox/mode` event.
+    #
+    # `cross-review-internal-guard` (last row) is the mechanism that actually
+    # holds: it pins this session to `read-only` before the shell runs and
+    # refuses a shell call it cannot vouch for. The confinement is then the
+    # runtime's own sandbox, not a prompt request.
     - id: preset-cross-review-internal
       name: '@deepseek-ai/dsh-agent-preset'
       config:
@@ -164,9 +218,13 @@
 
                 你的价值不在于挑错，而在于让主代理一次做对：把模糊之处变成明确的假设或问题，把"看起来做完"变成可验证的通过项。
 
-                你是独立审查者，不是执行者。文件工具只提供读取能力（write / edit / apply_patch 已关闭）；shell 仅用于只读检查或运行测试，不要安装依赖、不要提交或部署、不要执行任何会改变工作区或外部状态的命令。
+                你是独立审查者，不是执行者。文件工具只提供读取能力（write / edit / apply_patch 已关闭）；shell 由运行时强制限制在只读沙箱内——不是"请勿修改"，而是写不进去。不要尝试安装依赖、提交、部署或任何会改变工作区或外部状态的命令；被沙箱拒绝时如实报告，不要绕道。
 
                 不要为了显得严格而编造问题；也不要因为"看起来差不多"就放过真实缺陷。证据不足时，把它作为风险点提示主代理补证据，而不是直接否决。
+
+                交付审核时逐条覆盖需求里的全部验收标准（AC1…），一次列出所有 fail / unverified / blocking，不要只报第一个就停。
+
+                注重效率：优先用主代理已提供的 files、证据与工具事实定位目标，避免全库 glob 和重复读取同一文件；能一次 read/grep 确认的就不要反复探索，命令/测试只在缺少关键证据时运行。但效率不降低核实强度——每条标准至少要有一次针对性 read/grep 作为 pass 依据。
 
                 严格按要求返回结论。`
           - id: time-context
@@ -194,3 +252,7 @@
             config:
               fetch: true
               searchTimeoutMs: 60000
+          # Enforces the read-only shell: pins this session to `read-only` before
+          # the shell runs and refuses a shell call the composition cannot confine.
+          - id: internal-guard
+            name: '@local/dsh-cross-review/internal-guard'

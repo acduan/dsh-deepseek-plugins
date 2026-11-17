@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-cross-review",
-  "version": "1.2.0",
+  "version": "1.4.2",
   "private": true,
   "type": "module",
   "description": "Cross-Verification Mode: an arbiter preset with requirement-brief and delivery-audit tools, plus a model settings page with a connectivity probe.",
@@ -9,16 +9,19 @@
   "exports": {
     ".": "./index.js",
     "./preset": "./preset.js",
+    "./internal-guard": "./internal-guard.js",
     "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "test:contract": "node --test test/schema-contract.test.mjs"
   },
   "files": [
     "index.js",
     "preset.js",
+    "internal-guard.js",
     "client.js",
     "cordis.patch.yml",
     "locale/*.json",

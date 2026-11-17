@@ -3,15 +3,103 @@ import { test } from 'node:test'
 
 import {
   DEFAULT_ARBITER,
+  FINAL_CHILD_RULINGS,
+  FINAL_TOOL_RULINGS,
+  FINAL_TOOL_SCHEMA,
   buildProtocol,
+  buildFinalAuditPrompt,
+  clipMiddle,
+  collectSessionContext,
+  criteriaWithIds,
+  criterionCovered,
+  errorFinalAudit,
+  extractCriteriaFromRequirement,
   normalizeBrief,
+  normalizeCriterionText,
   normalizeFinalAudit,
+  parseExitCode,
   parseJsonLoose,
   renderBriefSpec,
   renderToolFacts,
   routeOf,
+  skippedFinalAudit,
   summarizeToolFacts,
 } from '../preset.js'
+
+// A local mirror of the runtime's schema validator, limited to the keywords this
+// plugin actually declares (object/array/string/enum/required). It exists because
+// the real validator lives inside the DSH installation, which a profile plugin
+// must not import; `test/schema-contract.test.mjs` re-checks the same values with
+// the runtime's own validator when the installation is reachable.
+function validateNode(schema, value, path = 'value') {
+  const violations = []
+  if (schema.enum !== undefined && !schema.enum.includes(value)) {
+    violations.push(`${path} must be one of ${JSON.stringify(schema.enum)}`)
+  }
+  if (schema.type === 'object') {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return [...violations, `${path} must be an object`]
+    }
+    for (const key of schema.required ?? []) {
+      if (!(key in value)) violations.push(`${path}.${key} is required`)
+    }
+    const properties = schema.properties ?? {}
+    for (const [key, child] of Object.entries(value)) {
+      if (!(key in properties)) {
+        if (schema.additionalProperties === false) violations.push(`${path}.${key} is not allowed`)
+        continue
+      }
+      violations.push(...validateNode(properties[key], child, `${path}.${key}`))
+    }
+  } else if (schema.type === 'array') {
+    if (!Array.isArray(value)) return [...violations, `${path} must be an array`]
+    for (let i = 0; i < value.length; i += 1) {
+      violations.push(...validateNode(schema.items ?? {}, value[i], `${path}[${i}]`))
+    }
+  } else if (schema.type === 'string' && typeof value !== 'string') {
+    violations.push(`${path} must be a string`)
+  }
+  return violations
+}
+
+test('every cross_review_final result satisfies its declared output schema', () => {
+  // Regression for the defect where `error`/`unstructured` were returned but the
+  // declared enum only allowed three verdicts: the runtime validates tool return
+  // values, so those paths were rejected as ToolOutputError and the caller never
+  // saw the ruling, summary, or required_actions at all.
+  const cases = {
+    'arbiter disabled': skippedFinalAudit('裁决者已在设置中停用'),
+    'audit duty disabled': skippedFinalAudit('交付审核已在设置中关闭'),
+    'child failed': errorFinalAudit('无法完成交付审核：交叉复核超时（180s）', 'magpie/x'),
+    'undecidable verdict': normalizeFinalAudit(undefined, 'not json', 'm'),
+    'unknown ruling': normalizeFinalAudit({ ruling: 'probably fine' }, '', 'm'),
+    ready: normalizeFinalAudit({ ruling: 'ready' }, '', 'm'),
+    'not ready': normalizeFinalAudit({ ruling: 'not_ready' }, '', 'm'),
+    'need more evidence': normalizeFinalAudit({ ruling: 'need_more_evidence' }, '', 'm'),
+    'ready downgraded by a failed criterion': normalizeFinalAudit(
+      { ruling: 'ready', criteria: [{ item: 'x', status: 'fail', evidence: 'y' }] },
+      '',
+      'm',
+    ),
+  }
+  for (const [label, value] of Object.entries(cases)) {
+    assert.deepEqual(validateNode(FINAL_TOOL_SCHEMA, value), [], `${label} must satisfy output.schema`)
+  }
+})
+
+test('the tool ruling vocabulary is a superset of what the arbiter may submit', () => {
+  for (const ruling of FINAL_CHILD_RULINGS) {
+    assert.ok(FINAL_TOOL_RULINGS.includes(ruling), `${ruling} must stay valid for the tool`)
+  }
+  assert.ok(FINAL_TOOL_RULINGS.includes('error'))
+  assert.ok(FINAL_TOOL_RULINGS.includes('skipped'))
+})
+
+test('a switched-off audit is recorded as skipped, never as a pass', () => {
+  const skipped = skippedFinalAudit('交付审核已在设置中关闭')
+  assert.equal(skipped.ruling, 'skipped')
+  assert.notEqual(skipped.ruling, 'ready')
+})
 
 test('routeOf falls back to the deployment defaults', () => {
   const route = routeOf(undefined, DEFAULT_ARBITER)
@@ -30,10 +118,17 @@ test('routeOf keeps an explicit route without an effort', () => {
   assert.equal(route.auditEnabled, true)
 })
 
-test('routeOf honours the disabled switch and timeout override', () => {
-  const route = routeOf({ enabled: false, timeoutMs: 42 }, DEFAULT_ARBITER)
+test('routeOf honours the disabled switch', () => {
+  const route = routeOf({ enabled: false }, DEFAULT_ARBITER)
   assert.equal(route.enabled, false)
-  assert.equal(route.timeoutMs, 42)
+})
+
+test('routeOf clamps an out-of-range timeout instead of trusting it', () => {
+  // A hand-written YAML config never passes through the Host store, so the
+  // preset has to enforce the same bounds.
+  assert.equal(routeOf({ timeoutMs: 42 }, DEFAULT_ARBITER).timeoutMs, 10000)
+  assert.equal(routeOf({ timeoutMs: 9_000_000 }, DEFAULT_ARBITER).timeoutMs, 1800000)
+  assert.equal(routeOf({ timeoutMs: 120000 }, DEFAULT_ARBITER).timeoutMs, 120000)
 })
 
 test('parseJsonLoose accepts fenced and prose-wrapped JSON', () => {
@@ -65,8 +160,18 @@ test('normalizeFinalAudit refuses ready with blocking issues', () => {
   assert.equal(audit.ruling, 'not_ready')
 })
 
-test('normalizeFinalAudit maps unknown rulings to unstructured', () => {
-  assert.equal(normalizeFinalAudit({ ruling: 'probably fine' }, '', 'm').ruling, 'unstructured')
+test('normalizeFinalAudit reports an undecidable verdict as error, not a pass', () => {
+  // `unstructured` used to be returned here, which violated the tool's declared
+  // output enum and made the runtime reject the whole result.
+  assert.equal(normalizeFinalAudit({ ruling: 'probably fine' }, '', 'm').ruling, 'error')
+  assert.equal(normalizeFinalAudit(undefined, 'not json at all', 'm').ruling, 'error')
+  assert.equal(normalizeFinalAudit({}, '', 'm').ruling, 'error')
+})
+
+test('an error ruling always carries an actionable next step', () => {
+  const audit = normalizeFinalAudit(undefined, '', 'm')
+  assert.ok(audit.required_actions.length > 0, 'error must tell the caller what to do')
+  assert.match(audit.required_actions[0], /重试|披露/)
 })
 
 test('normalizeBrief accepts camelCase keys from a text fallback', () => {
@@ -87,7 +192,7 @@ test('summarizeToolFacts extracts writes, commands and failures', () => {
   ])
   assert.equal(facts.total, 2)
   assert.deepEqual(facts.writes, ['write → a.js'])
-  assert.deepEqual(facts.shells, ['pwsh（失败）: Get-ChildItem'])
+  assert.deepEqual(facts.shells, ['pwsh: Get-ChildItem [失败]；结果正文缺失'])
   assert.deepEqual(facts.failed, ['pwsh: boom'])
 })
 
@@ -102,7 +207,7 @@ test('renderToolFacts says so when nothing was recorded', () => {
   assert.match(text, /尚未记录任何工具调用/)
 })
 
-test('renderBriefSpec carries the acceptance criteria forward', () => {
+test('renderBriefSpec carries the acceptance criteria forward with stable ids', () => {
   const text = renderBriefSpec({
     goal: '修登录',
     in_scope: ['登录页'],
@@ -110,7 +215,8 @@ test('renderBriefSpec carries the acceptance criteria forward', () => {
     acceptance_criteria: ['能登录', '错误提示可见'],
   })
   assert.match(text, /目标：修登录/)
-  assert.match(text, /- 能登录/)
+  assert.match(text, /AC1: 能登录/)
+  assert.match(text, /AC2: 错误提示可见/)
   assert.match(text, /范围外（不做）/)
 })
 
@@ -135,4 +241,368 @@ test('buildProtocol keeps the light-task exemption and error semantics', () => {
   assert.match(text, /既不是通过也不是不通过/)
   assert.match(text, /两个角色/)
   assert.doesNotMatch(text, /复核者/)
+})
+
+test('parseExitCode reads only the known exit-code marker', () => {
+  assert.equal(parseExitCode('done\n[exit code: 0]'), 0)
+  assert.equal(parseExitCode('[exit code: 3] failed'), 3)
+  assert.equal(parseExitCode('processed 200 files in 500 ms'), undefined)
+})
+
+test('normalizeCriterionText unifies whitespace and strips the AC prefix', () => {
+  assert.equal(normalizeCriterionText('AC2:  能\r\n登录 '), normalizeCriterionText('能登录'))
+  assert.notEqual(normalizeCriterionText('能登录'), normalizeCriterionText('能注册'))
+})
+
+test('criterionCovered requires exact normalized text; an id alone does not cover', () => {
+  const expected = { id: 'AC1', text: '顶栏背景为 #ebeef3' }
+  assert.equal(criterionCovered({ item: '顶栏背景为 #ebeef3' }, expected), true)
+  assert.equal(criterionCovered({ item: '顶栏背景为#ebeef3 ' }, expected), true)
+  // A criterion_id on its own must not stand in for the required text.
+  assert.equal(criterionCovered({ item: '别的内容', criterionId: 'AC1' }, expected), false)
+  assert.equal(criterionCovered({ item: '顶栏改成浅灰' }, expected), false)
+})
+
+test('extractCriteriaFromRequirement reads AC labels and 验收标准 lists', () => {
+  assert.deepEqual(extractCriteriaFromRequirement('验收标准：\n- 能登录\n- 错误提示可见'), ['能登录', '错误提示可见'])
+  assert.deepEqual(extractCriteriaFromRequirement('AC1 甲\nAC2 乙'), ['甲', '乙'])
+  // Blank lines inside the list must not end it.
+  assert.deepEqual(extractCriteriaFromRequirement('验收标准：\n1. A\n\n2. B'), ['A', 'B'])
+  // Mixed AC-labelled and numbered items in one list are all captured.
+  assert.deepEqual(extractCriteriaFromRequirement('AC1: A\n2. B'), ['A', 'B'])
+  // A Markdown criteria heading must still open the list.
+  assert.deepEqual(extractCriteriaFromRequirement('## 验收标准\n1. A\n2. B'), ['A', 'B'])
+  // A list item that merely mentions the word must not be mistaken for a heading.
+  assert.deepEqual(extractCriteriaFromRequirement('验收标准：\n1. A\n2. 所有验收标准需有日志'), ['A', '所有验收标准需有日志'])
+  // A continuation line of a list item is kept with that item, not dropped.
+  assert.deepEqual(extractCriteriaFromRequirement('验收标准：\n1. A\n   必须同时满足 B\n2. C'), ['A 必须同时满足 B', 'C'])
+  // A continuation that itself begins with "验收标准" is still a continuation, not a heading.
+  assert.deepEqual(
+    extractCriteriaFromRequirement('验收标准：\n1. A\n   验收标准还必须同时满足 B\n2. C'),
+    ['A 验收标准还必须同时满足 B', 'C'],
+  )
+  assert.deepEqual(extractCriteriaFromRequirement('这是一段没有结构的自然语言需求'), [])
+})
+
+test('summarizeToolFacts distinguishes command states and excerpts bounded output', () => {
+  const facts = summarizeToolFacts([
+    { type: 'tool/call', data: { callId: 'c1', name: 'pwsh', arguments: JSON.stringify({ command: 'run tests' }) } },
+    { type: 'tool/result', data: { message: { source: { callId: 'c1' }, isError: false, content: [{ type: 'text', text: 'PASS 78\n[exit code: 0]' }] } } },
+    { type: 'tool/call', data: { callId: 'c2', name: 'pwsh', arguments: JSON.stringify({ command: 'deploy' }) } },
+    { type: 'tool/result', data: { message: { source: { callId: 'c2' }, isError: false, content: [{ type: 'text', text: 'boom\n[exit code: 3]' }] } } },
+    { type: 'tool/call', data: { callId: 'c3', name: 'pwsh', arguments: JSON.stringify({ command: 'sleep 1' }) } },
+  ])
+  assert.equal(facts.total, 3)
+  assert.match(facts.shells[0], /\[退出码 0\]；输出：PASS 78/)
+  assert.match(facts.shells[1], /\[退出码 3，失败\]/)
+  assert.match(facts.shells[2], /\[未返回结果，不能视为成功\]/)
+  assert.ok(facts.failed.some((entry) => /退出码 3/.test(entry)))
+})
+
+test('a ready audit missing a brief criterion is downgraded to need_more_evidence', () => {
+  const expectedCriteria = criteriaWithIds(['能登录', '错误提示可见'])
+  const audit = normalizeFinalAudit(
+    { ruling: 'ready', summary: 'ok', criteria: [{ item: '能登录', status: 'pass', evidence: '实测可登录' }] },
+    '',
+    'm',
+    { expectedCriteria },
+  )
+  assert.equal(audit.ruling, 'need_more_evidence')
+  assert.match(audit.required_actions.join('\n'), /AC2: 错误提示可见/)
+})
+
+test('a ready audit covering every criterion with evidence stays ready', () => {
+  const expectedCriteria = criteriaWithIds(['能登录', '错误提示可见'])
+  const audit = normalizeFinalAudit(
+    {
+      ruling: 'ready',
+      criteria: [
+        { item: '能登录', status: 'pass', evidence: '运行登录成功' },
+        { item: '错误提示可见', status: 'pass', evidence: '截图见 logs/x.png' },
+      ],
+    },
+    '',
+    'm',
+    { expectedCriteria },
+  )
+  assert.equal(audit.ruling, 'ready')
+})
+
+test('duplicate rows cannot stand in for a missing criterion', () => {
+  const expectedCriteria = criteriaWithIds(['A', 'B', 'C'])
+  const audit = normalizeFinalAudit(
+    {
+      ruling: 'ready',
+      criteria: [
+        { item: 'A', status: 'pass', evidence: 'e1' },
+        { item: 'A', status: 'pass', evidence: 'e2' },
+      ],
+    },
+    '',
+    'm',
+    { expectedCriteria },
+  )
+  assert.equal(audit.ruling, 'need_more_evidence')
+  assert.match(audit.required_actions.join('\n'), /AC2: B/)
+  assert.match(audit.required_actions.join('\n'), /AC3: C/)
+})
+
+test('a pass with empty evidence is treated as unverified, never ready', () => {
+  const expectedCriteria = criteriaWithIds(['能登录'])
+  const audit = normalizeFinalAudit(
+    { ruling: 'ready', criteria: [{ item: '能登录', status: 'pass', evidence: '   ' }] },
+    '',
+    'm',
+    { expectedCriteria },
+  )
+  assert.equal(audit.ruling, 'need_more_evidence')
+  assert.equal(audit.criteria[0].status, 'unverified')
+})
+
+test('an unrelated row does not cover a missing criterion', () => {
+  const expectedCriteria = criteriaWithIds(['顶层容器背景', 'iframe 内容背景'])
+  const audit = normalizeFinalAudit(
+    {
+      ruling: 'ready',
+      criteria: [
+        { item: '顶层容器背景', status: 'pass', evidence: 'e' },
+        { item: '某个无关的按钮颜色', status: 'pass', evidence: 'e' },
+      ],
+    },
+    '',
+    'm',
+    { expectedCriteria },
+  )
+  assert.equal(audit.ruling, 'need_more_evidence')
+  assert.match(audit.required_actions.join('\n'), /AC2: iframe 内容背景/)
+})
+
+test('a ready audit with zero recorded tool calls is downgraded', () => {
+  const expectedCriteria = criteriaWithIds(['测试通过'])
+  const audit = normalizeFinalAudit(
+    { ruling: 'ready', criteria: [{ item: '测试通过', status: 'pass', evidence: '跑了 56 个测试' }] },
+    '',
+    'm',
+    { expectedCriteria, noToolCalls: true },
+  )
+  assert.equal(audit.ruling, 'need_more_evidence')
+  assert.match(audit.required_actions.join('\n'), /未记录任何工具调用/)
+})
+
+test('a fail plus a missing criterion is not_ready and keeps both problems', () => {
+  const expectedCriteria = criteriaWithIds(['A', 'B'])
+  const audit = normalizeFinalAudit(
+    { ruling: 'ready', criteria: [{ item: 'A', status: 'fail', evidence: 'boom' }] },
+    '',
+    'm',
+    { expectedCriteria },
+  )
+  assert.equal(audit.ruling, 'not_ready')
+  assert.match(audit.required_actions.join('\n'), /AC2: B/)
+})
+
+test('final audit prompt asks for economical verification without lowering rigor', () => {
+  const text = buildFinalAuditPrompt({ requirement: 'AC1: A', claim: 'done' })
+  assert.match(text, /效率要求/)
+  assert.match(text, /全库 glob/)
+  assert.match(text, /至少要有一次针对性/)
+})
+
+test('collectSessionContext no longer attaches the conversation digest', async () => {
+  const raw = Array.from({ length: 8 }, (_v, i) => ({
+    role: 'user',
+    content: [{ type: 'text', text: `msg-${i}` }],
+  }))
+  const ctx = {
+    get: (key) =>
+      key === 'sessionQuery'
+        ? { inspectSession: async (_id, fn) => fn({ snapshotEvents: () => [], deriveMessages: () => raw }) }
+        : undefined,
+  }
+  const exec = { agent: { session: { id: 'trim-session' } } }
+  const out = await collectSessionContext(ctx, exec)
+  // The digest is intentionally gone; only objective tool facts remain.
+  assert.doesNotMatch(out.text, /最近对话/)
+  assert.doesNotMatch(out.text, /msg-7/)
+  assert.equal(out.toolFactTotal, 0)
+})
+
+test('clipMiddle keeps the head and tail within the cap', () => {
+  const long = `${'a'.repeat(200)}END`
+  const clipped = clipMiddle(long, 120)
+  assert.ok(clipped.length <= 121)
+  assert.match(clipped, /…/)
+  assert.match(clipped, /END$/)
+  assert.equal(clipMiddle('short', 120), 'short')
+})
+
+test('long evidence is truncated with a marker', () => {
+  const text = buildFinalAuditPrompt({ requirement: 'AC1: A', claim: 'done', evidence: 'x'.repeat(5000) })
+  assert.match(text, /请精简粘贴关键片段/)
+  assert.match(text, /\[truncated \d+ chars\]/)
+})
+
+test('renderToolFacts no longer prints a separate failed list', () => {
+  const text = renderToolFacts({
+    writes: ['write → a.js'],
+    shells: ['pwsh: x [失败]'],
+    failed: ['pwsh: boom'],
+    total: 2,
+  })
+  assert.doesNotMatch(text, /失败的调用/)
+  assert.match(text, /\[失败\]/)
+})
+
+test('a ready with no per-criterion rows is not a verified pass', () => {
+  const audit = normalizeFinalAudit({ ruling: 'ready', summary: 'done' }, '', 'm')
+  assert.equal(audit.ruling, 'need_more_evidence')
+  assert.match(audit.required_actions.join('\n'), /没有任何逐条结论/)
+  // One concrete row with evidence (no expected list) is an acceptable pass.
+  const ok = normalizeFinalAudit(
+    { ruling: 'ready', criteria: [{ item: '能登录', status: 'pass', evidence: 'curl 200' }] },
+    '',
+    'm',
+  )
+  assert.equal(ok.ruling, 'ready')
+})
+
+test('one row cannot cover two criteria (id/text cross-collision)', () => {
+  const expectedCriteria = criteriaWithIds(['A', 'B', 'C'])
+  const audit = normalizeFinalAudit(
+    {
+      ruling: 'ready',
+      criteria: [
+        // criterion_id says AC3 but the text is criterion A: ambiguous, covers none.
+        { criterion_id: 'AC3', item: 'A', status: 'pass', evidence: 'e' },
+        { item: 'B', status: 'pass', evidence: 'e' },
+      ],
+    },
+    '',
+    'm',
+    { expectedCriteria },
+  )
+  assert.equal(audit.ruling, 'need_more_evidence')
+  assert.match(audit.required_actions.join('\n'), /AC1: A/)
+  assert.match(audit.required_actions.join('\n'), /AC3: C/)
+})
+
+test('a need_more_evidence verdict carrying a known fail is upgraded to not_ready', () => {
+  const audit = normalizeFinalAudit(
+    { ruling: 'need_more_evidence', criteria: [{ item: 'A', status: 'fail', evidence: 'boom' }] },
+    '',
+    'm',
+  )
+  assert.equal(audit.ruling, 'not_ready')
+})
+
+test('a malformed row with empty item but fail status still blocks', () => {
+  const audit = normalizeFinalAudit(
+    { ruling: 'ready', criteria: [{ item: '   ', status: 'fail', evidence: 'boom' }] },
+    '',
+    'm',
+  )
+  assert.equal(audit.ruling, 'not_ready')
+})
+
+test('long criteria are compared on full text (not after the 500-char display truncation)', () => {
+  const prefix = '很长的验收标准'.repeat(100) // 700 chars, identical prefix for both
+  const first = `${prefix}结尾甲`
+  const second = `${prefix}结尾乙`
+  const expectedCriteria = criteriaWithIds([first, second])
+  const audit = normalizeFinalAudit(
+    { ruling: 'ready', criteria: [{ item: first, status: 'pass', evidence: 'e' }] },
+    '',
+    'm',
+    { expectedCriteria },
+  )
+  assert.equal(audit.ruling, 'need_more_evidence')
+  assert.match(audit.summary, /1 条验收标准未逐条覆盖/)
+})
+
+test('an id alone cannot cover a criterion when the text is unrelated', () => {
+  const expectedCriteria = criteriaWithIds(['A', 'B', 'C'])
+  const audit = normalizeFinalAudit(
+    {
+      ruling: 'ready',
+      criteria: [
+        { item: 'A', status: 'pass', evidence: 'e' },
+        { item: 'B', status: 'pass', evidence: 'e' },
+        // Valid AC3 id but unrelated text D: C must still be reported missing.
+        { criterion_id: 'AC3', item: 'D', status: 'pass', evidence: 'e' },
+      ],
+    },
+    '',
+    'm',
+    { expectedCriteria },
+  )
+  assert.equal(audit.ruling, 'need_more_evidence')
+  assert.match(audit.required_actions.join('\n'), /AC3: C/)
+})
+
+test('collectSessionContext marks tool facts unavailable without a session query', async () => {
+  const ctx = { get: () => undefined }
+  const exec = { agent: { session: { id: 'ctx-s1' } } }
+  const out = await collectSessionContext(ctx, exec)
+  assert.equal(out.toolFactTotal, null)
+  assert.match(out.text, /未能读取本会话工具调用记录|工具调用事实不可用/)
+})
+
+test('collectSessionContext marks tool facts unavailable when the query throws', async () => {
+  const ctx = {
+    get: (key) => (key === 'sessionQuery' ? { inspectSession: async () => { throw new Error('boom') } } : undefined),
+  }
+  const exec = { agent: { session: { id: 'ctx-s2' } } }
+  const out = await collectSessionContext(ctx, exec)
+  assert.equal(out.toolFactTotal, null)
+  assert.match(out.text, /工具调用事实不可用/)
+})
+
+test('controlled scope: partial fixes never pass (topbar / iframe / KPI)', () => {
+  const expectedCriteria = criteriaWithIds([
+    '顶栏背景色改为 #3a807e',
+    '首页 iframe 内容背景改为 #ebeef3',
+    '移除首页硬编码「—」占位卡',
+  ])
+  // Only the top bar was fixed; the other two still fail → not_ready.
+  const partial = normalizeFinalAudit(
+    {
+      ruling: 'ready',
+      criteria: [
+        { item: '顶栏背景色改为 #3a807e', status: 'pass', evidence: '截图+计算色' },
+        { item: '首页 iframe 内容背景改为 #ebeef3', status: 'fail', evidence: '仍是 #f4f6fa' },
+        { item: '移除首页硬编码「—」占位卡', status: 'fail', evidence: '仍有 4 个占位卡' },
+      ],
+    },
+    '',
+    'm',
+    { expectedCriteria },
+  )
+  assert.equal(partial.ruling, 'not_ready')
+
+  // The arbiter ruled on only one item and skipped the other two → not ready.
+  const missed = normalizeFinalAudit(
+    { ruling: 'ready', criteria: [{ item: '顶栏背景色改为 #3a807e', status: 'pass', evidence: 'x' }] },
+    '',
+    'm',
+    { expectedCriteria },
+  )
+  assert.equal(missed.ruling, 'need_more_evidence')
+  assert.match(missed.required_actions.join('\n'), /AC2/)
+  assert.match(missed.required_actions.join('\n'), /AC3/)
+
+  // All three fixed with evidence → ready.
+  const done = normalizeFinalAudit(
+    {
+      ruling: 'ready',
+      criteria: [
+        { criterion_id: 'AC1', item: '顶栏背景色改为 #3a807e', status: 'pass', evidence: 'rgb(58,128,126)' },
+        { criterion_id: 'AC2', item: '首页 iframe 内容背景改为 #ebeef3', status: 'pass', evidence: 'rgb(235,238,243)' },
+        { criterion_id: 'AC3', item: '移除首页硬编码「—」占位卡', status: 'pass', evidence: 'DOM 无 .qmx-cards' },
+      ],
+    },
+    '',
+    'm',
+    { expectedCriteria },
+  )
+  assert.equal(done.ruling, 'ready')
 })
