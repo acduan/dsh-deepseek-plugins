@@ -64,7 +64,7 @@ window.__ModuleLoader__.load({
           partialFail: '部分 provider 读取失败：',
           storageOff: '存储不可用',
           footer:
-            '提示：停用裁决者后，对应工具会直接跳过而不启动子代理；超时按秒配置，范围 10–1800 秒。修改只影响新产生的调用，不改写已记录的历史工具结果。',
+            '提示：停用裁决者后，对应工具会直接跳过而不启动子代理；超时按秒配置，范围 10–3600 秒。修改只影响新产生的调用，不改写已记录的历史工具结果。',
         }
       : {
           title: 'Cross-Verification Mode',
@@ -110,7 +110,7 @@ window.__ModuleLoader__.load({
           partialFail: 'Some providers failed to list: ',
           storageOff: 'storage unavailable',
           footer:
-            'Disabling the arbiter makes its tools pass through without starting a child agent. The timeout is 10–1800 seconds. Changes affect new calls only; recorded tool results are never rewritten.',
+            'Disabling the arbiter makes its tools pass through without starting a child agent. The timeout is 10–3600 seconds. Changes affect new calls only; recorded tool results are never rewritten.',
         }
 
     const CSS = `
@@ -376,7 +376,7 @@ window.__ModuleLoader__.load({
               className: 'rbm-input',
               type: 'number',
               min: 10,
-              max: 1800,
+              max: 3600,
               step: 10,
               value: toSeconds(route.timeoutMs),
               disabled: off,

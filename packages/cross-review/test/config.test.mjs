@@ -63,6 +63,9 @@ test('normalizeConfig rejects a non-object payload', () => {
 test('normalizeConfig clamps the timeout into the shared bounds', () => {
   assert.equal(normalizeConfig({ arbiter: { timeoutMs: 1 } }).arbiter.timeoutMs, TIMEOUT_MIN_MS)
   assert.equal(normalizeConfig({ arbiter: { timeoutMs: 9_000_000 } }).arbiter.timeoutMs, TIMEOUT_MAX_MS)
+  // Regression: 3600s (3,600,000 ms) must survive, not be clamped to 1800s.
+  assert.equal(normalizeConfig({ arbiter: { timeoutMs: 3_600_000 } }).arbiter.timeoutMs, 3_600_000)
+  assert.ok(TIMEOUT_MAX_MS >= 3_600_000)
 })
 
 test('normalizeConfig keeps an explicitly cleared reasoning effort cleared', () => {

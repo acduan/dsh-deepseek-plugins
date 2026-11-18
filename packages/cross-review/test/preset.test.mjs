@@ -127,8 +127,10 @@ test('routeOf clamps an out-of-range timeout instead of trusting it', () => {
   // A hand-written YAML config never passes through the Host store, so the
   // preset has to enforce the same bounds.
   assert.equal(routeOf({ timeoutMs: 42 }, DEFAULT_ARBITER).timeoutMs, 10000)
-  assert.equal(routeOf({ timeoutMs: 9_000_000 }, DEFAULT_ARBITER).timeoutMs, 1800000)
+  assert.equal(routeOf({ timeoutMs: 9_000_000 }, DEFAULT_ARBITER).timeoutMs, 3600000)
   assert.equal(routeOf({ timeoutMs: 120000 }, DEFAULT_ARBITER).timeoutMs, 120000)
+  // Regression: a 3600s budget must not be clamped back to 1800s.
+  assert.equal(routeOf({ timeoutMs: 3_600_000 }, DEFAULT_ARBITER).timeoutMs, 3_600_000)
 })
 
 test('parseJsonLoose accepts fenced and prose-wrapped JSON', () => {

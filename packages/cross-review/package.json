@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-cross-review",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "private": true,
   "type": "module",
   "description": "Cross-Verification Mode: an arbiter preset with requirement-brief and delivery-audit tools, plus a model settings page with a connectivity probe.",

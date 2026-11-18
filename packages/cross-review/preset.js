@@ -51,7 +51,7 @@ const DEFAULT_TIMEOUT_MS = 180000
 // answer. Clamping here too keeps a hand-written YAML config honest, not just
 // the values that travel through /api/cross-review-config.
 const TIMEOUT_MIN_MS = 10000
-const TIMEOUT_MAX_MS = 1800000
+const TIMEOUT_MAX_MS = 3600000
 // One retry is enough: a second consecutive infrastructure failure is reported
 // rather than paid for twice.
 const RETRY_DELAY_MS = 900

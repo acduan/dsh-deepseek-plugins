@@ -39,7 +39,9 @@ export const DEFAULT_CONFIG = Object.freeze({
 // Timeout bounds shared with the settings page: a child that cannot answer in
 // ten minutes will not answer, and a sub-second budget would kill every call.
 export const TIMEOUT_MIN_MS = 10000
-export const TIMEOUT_MAX_MS = 1800000
+// Upper bound raised to 3600s (1h): 30min was too tight for slow providers. A
+// value above this is still clamped, so the settings page must advertise it.
+export const TIMEOUT_MAX_MS = 3600000
 
 // The model catalog is expensive (one adapter round trip per model), so it is
 // cached briefly. The settings page can force a refresh, and a successful save
