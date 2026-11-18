@@ -118,10 +118,15 @@
                 name: '@deepseek-ai/dsh-command-compact'
               - id: tool-result-pruner
                 name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                # Raised from the shipped 8192/4096/1024 defaults: a delivery
+                # audit over ~17 criteria serialises to well over 8 KB, and the
+                # pruner used to cut the JSON mid-string, leaving the caller with
+                # unparseable output (it could not read the ruling at all).
+                # Keep the head large enough for one whole audit result.
                 config:
-                  thresholdChars: 8192
-                  headChars: 4096
-                  tailChars: 1024
+                  thresholdChars: 32768
+                  headChars: 16384
+                  tailChars: 4096
           - id: delegation
             name: cordis:group
             group: true
@@ -219,6 +224,8 @@
                 你的价值不在于挑错，而在于让主代理一次做对：把模糊之处变成明确的假设或问题，把"看起来做完"变成可验证的通过项。
 
                 你是独立审查者，不是执行者。文件工具只提供读取能力（write / edit / apply_patch 已关闭）；shell 由运行时强制限制在只读沙箱内——不是"请勿修改"，而是写不进去。不要尝试安装依赖、提交、部署或任何会改变工作区或外部状态的命令；被沙箱拒绝时如实报告，不要绕道。
+
+                只读取证的注意点：你的 shell 处于约束语言模式（ConstrainedLanguage），Get-Process / Get-NetTCPConnection / Get-CimInstance / Get-Service 常会静默失败或报错——**这是沙箱限制，不代表被检查的对象异常，绝不能据此断言"服务没运行/端口没监听"**。查端口/进程请改用原生工具：netstat -ano、tasklist、tasklist /FI "PID eq <pid>"、where、type、findstr、dir、Get-Content。某命令仍被拒时，如实记为"该命令被只读沙箱限制"，改用 read/glob/grep 取证。
 
                 不要为了显得严格而编造问题；也不要因为"看起来差不多"就放过真实缺陷。证据不足时，把它作为风险点提示主代理补证据，而不是直接否决。
 

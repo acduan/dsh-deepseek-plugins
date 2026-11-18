@@ -25,6 +25,15 @@ export const inject = ['tools']
 
 const SHELL_TOOLS = new Set(['bash', 'pwsh'])
 
+// A short, shell-agnostic list of read-only commands that work inside the
+// constrained (read-only) sandbox. Some cmdlets — Get-Process, Get-NetTCPConnection,
+// Get-CimInstance, Get-Service — fail or silently return nothing under
+// ConstrainedLanguage, which used to make the arbiter report "service is down"
+// when the service was actually running. Point it at native tools instead.
+const SAFE_FORENSICS_HINT =
+  '可改用只读取证命令：netstat -ano、tasklist、tasklist /FI "PID eq <pid>"、where、type、findstr、dir、Get-Content；' +
+  'Get-Process / Get-NetTCPConnection / Get-CimInstance 在只读沙箱下可能静默失败，那是沙箱限制、不是被检查对象异常。'
+
 // Only the mode is read; the service is optional so a profile without a sandbox
 // policy still mounts this row and simply cannot vouch for the shell.
 function policyOf(ctx) {
@@ -73,10 +82,10 @@ export function apply(ctx) {
     if (mode === undefined) {
       // No sandbox policy to vouch for: running a shell here would be
       // unconfined, which is exactly what this preset must not allow.
-      return '交叉复核子代理的 shell 不可用：当前组合没有可用的沙箱策略，无法保证只读。请改用 read/glob/grep 取证。'
+      return `交叉复核子代理的 shell 不可用：当前组合没有可用的沙箱策略，无法保证只读。请改用 read/glob/grep 取证。`
     }
     if (mode !== 'read-only') {
-      return `交叉复核子代理的 shell 被限制在只读沙箱内（当前 ${mode}，无法收窄）。请改用 read/glob/grep 取证，或让主代理把命令输出作为证据提供。`
+      return `交叉复核子代理的 shell 被限制在只读沙箱内（当前 ${mode}，无法收窄）。请改用 read/glob/grep 取证，或让主代理把命令输出作为证据提供。${SAFE_FORENSICS_HINT}`
     }
     return undefined
   })

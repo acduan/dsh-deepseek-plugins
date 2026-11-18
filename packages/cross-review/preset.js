@@ -79,6 +79,53 @@ function pruneBriefs(now = Date.now()) {
   }
 }
 
+// Consecutive evidence-only review rounds per session, used to break the
+// "keep re-submitting hoping for a ready" loop (P2-1). Reset whenever a round has
+// a real fail/blocking or ends ready; pruned by the same TTL as briefs.
+const finalStrikes = new Map()
+const ROUND_CAP = 3
+
+function pruneFinalStrikes(now = Date.now()) {
+  for (const [key, record] of finalStrikes) {
+    if (now - record.at > BRIEF_TTL_MS) finalStrikes.delete(key)
+  }
+}
+
+/**
+ * Count consecutive rounds that ended `need_more_evidence` with no real failure.
+ * After ROUND_CAP such rounds the audit is escalated to the user instead of
+ * inviting another identical re-submission: the gap is almost always missing
+ * evidence the main agent cannot obtain (account, prod env, unreproducible
+ * state), not a code defect it can fix by resubmitting.
+ */
+function applyRoundCap(exec, audit) {
+  const key = briefKey(exec)
+  if (key === undefined) return audit
+  const rows = Array.isArray(audit.criteria) ? audit.criteria : []
+  const hasFail = rows.some((r) => r.status === 'fail') || (audit.blocking_issues || []).length > 0
+  const evidenceOnly = audit.ruling === 'need_more_evidence' && !hasFail
+  if (!evidenceOnly) {
+    finalStrikes.delete(key)
+    return audit
+  }
+  pruneFinalStrikes()
+  const prev = finalStrikes.get(key)
+  const count = (prev?.count ?? 0) + 1
+  finalStrikes.set(key, { count, at: Date.now() })
+  if (count < ROUND_CAP) return audit
+  const unverifiedItems = rows
+    .filter((r) => r.status === 'unverified')
+    .map((r) => String(r.item || '').slice(0, 120))
+    .filter(Boolean)
+    .slice(0, 8)
+  audit.escalated = true
+  audit.required_actions = [
+    ...(audit.required_actions || []),
+    `已连续 ${count} 轮交付审核为 need_more_evidence 且没有任何 fail 项，通常说明存在当前环境无法补齐的证据（缺账号 / 生产环境 / 不可复现状态），而不是代码缺陷。请**停止重复提交 cross_review_final**，直接向用户说明哪些项无法在当前环境验证并逐项给出环境原因，请用户决定是否接受或提供条件后再验${unverifiedItems.length ? `：${unverifiedItems.join('；')}` : '。'}`,
+  ]
+  return audit
+}
+
 const WRITE_TOOLS = new Set(['write', 'edit', 'apply_patch'])
 const SHELL_TOOLS = new Set(['bash', 'pwsh'])
 
@@ -321,6 +368,14 @@ const FINAL_TOOL_SCHEMA = {
       },
       arbiter_model: { type: 'string' },
       raw: { type: 'string' },
+      // Plugin-owned: true when the host had a machine-checkable criterion list
+      // and actually enforced per-criterion coverage. False means the audit ran
+      // against a free-form requirement, so the caller must disclose that coverage
+      // was not machine-verified (never treated as a silent pass).
+      coverage_enforced: { type: 'boolean' },
+      // Plugin-owned: true when consecutive evidence-only rounds tripped the round
+      // cap, telling the caller to stop re-submitting and escalate to the user.
+      escalated: { type: 'boolean' },
     },
     ['arbiter_model'],
   ),
@@ -361,9 +416,14 @@ ${args.evidence ? `主代理提供的证据（请精简粘贴关键片段，勿�
 ${renderFiles(args.files)}
 ${args.context ? `补充上下文：\n${args.context}\n` : ''}
 效率要求：优先用上面提供的 files、主代理证据与工具事实定位目标；**避免全库 glob 和重复读取同一文件**；能一次 read/grep 确认的就不要反复探索；命令/测试只在缺少关键证据时运行。但效率不降低核实强度——每条验收标准至少要有一次针对性的 read/grep 作为 pass 依据。
+
+只读取证命令（重要）：
+- 你的 shell 运行在**只读沙箱**里，部分 cmdlet 会因约束语言模式（ConstrainedLanguage）不可用：Get-Process、Get-NetTCPConnection、Get-CimInstance、Get-Service 常会**静默失败或报错**。这属于**沙箱限制，不代表被检查的对象异常**——绝不要据此断言「服务没运行 / 端口没监听」。
+- 需要查端口/进程时改用**原生工具**：netstat -ano、tasklist、tasklist /FI "PID eq <pid>"、where、type、findstr、dir、Get-Content；这些在只读沙箱内通常可用。若某命令仍被拒，如实记为「该命令被只读沙箱限制」，并改用 read/glob/grep 取证。
+
 审核规则：
 1. **必须自己验证**，不要相信主代理的声明。用 read/glob/grep 检查真实文件；只读命令或测试可以跑；不要修改任何文件。
-2. **逐条全覆盖**：需求里的每一条验收标准（AC1、AC2……）都必须在 criteria 中有一行，criterion_id 填对应编号、item 与原文一致。**一次性遍历全部条目**，即使已经发现某个失败，也要继续核查其余条目，不要只报第一个就停下。若需求是自然语言、没有编号清单，先在同一次审核内把它拆成完整的验收清单（逐条列出），再逐条核对，不要只挑其中几条。
+2. **逐条全覆盖**：需求里的每一条验收标准（AC1、AC2……）都必须在 criteria 中有一行：criterion_id 填对应编号（这是宿主核对覆盖的主键，务必填对），item 用你自己的话概括这条标准即可，**不必逐字复制原文**。**一次性遍历全部条目**，即使已经发现某个失败，也要继续核查其余条目，不要只报第一个就停下。若需求是自然语言、没有编号清单，先在同一次审核内把它拆成完整的验收清单（逐条列出并编号），再逐条核对，不要只挑其中几条。
 3. 每条给出 pass / fail / unverified 与依据。**status=pass 必须给出具体证据**（文件路径+行号、命令+关键输出或退出码、截图、测量值）；没有证据的请标 unverified，不要标 pass。
 4. **把所有 fail / unverified / blocking 一次性列全**，并为每一项给出 required_actions，让主代理能一次修完，减少来回。
 5. 特别检查这些常见虚假完成：声称改了但文件没变、声称测试通过但没有输出、只做了一部分却说全部完成、把"能编译"当成"功能正确"、留下未处理的警告或 TODO 却报告已完成。
@@ -861,25 +921,44 @@ function readBrief(exec) {
  * Number the acceptance criteria (AC1, AC2, …) so the rendered spec and the
  * host-side coverage check refer to the same stable identifiers.
  */
+// A leading criterion label as models actually emit it: "AC1: x", "AC1：x",
+// "AC1 x", "AC1（tag）：x", "AC1.x". The separator/space (or a full-width
+// parenthetical tag) after the digits is REQUIRED, so a genuine token like
+// "AC220V" is not mistaken for a label.
+const CRITERION_LABEL_RE =
+  /^AC\s*\d+\s*(?:[（(][^)）]*[)）]\s*[:：.)、\-]?|[:：.)、\-]|\s)\s*/i
+
+/**
+ * Strip a leading "ACn..." label from a criterion string while preserving the
+ * original spacing/casing of the body. Used when numbering criteria so the
+ * rendered spec does not double-label ("AC1: AC1 ...") and coverage compares the
+ * body, not the label.
+ */
+function stripCriterionLabel(value) {
+  return String(value ?? '').replace(CRITERION_LABEL_RE, '')
+}
+
 function criteriaWithIds(acceptanceCriteria) {
   return (Array.isArray(acceptanceCriteria) ? acceptanceCriteria : []).map((text, index) => ({
     id: `AC${index + 1}`,
-    text,
+    // Drop any label the brief/model embedded so the id is the single source of
+    // truth and the body is what the arbiter is asked to rule on.
+    text: stripCriterionLabel(text),
   }))
 }
 
 /**
- * Normalize a criterion for exact comparison: strip a leading "ACn:", unify line
- * breaks and collapse all whitespace. Coverage uses this deterministic rule on
- * the full text; fuzzy similarity is deliberately NOT used, because it would let
- * an unrelated or paraphrased item stand in for a missing one — exactly the
- * false pass this guard exists to prevent.
+ * Normalize a criterion for comparison: strip a leading "ACn..." label (all the
+ * real spellings — colon, full-width colon, bare space, or a "（tag）：" prefix),
+ * unify line breaks and collapse all whitespace.
+ *
+ * Case is preserved so case-sensitive identifiers (tokens, paths) are not
+ * conflated. This is only the *fallback* comparison when a row carries no
+ * criterion_id; the primary signal is the AC id (see `rowTarget`).
  */
 function normalizeCriterionText(value) {
-  // Only whitespace/newlines are unified and a leading "ACn:" stripped. Case is
-  // preserved so case-sensitive identifiers (e.g. tokens, paths) are not conflated.
   return String(value ?? '')
-    .replace(/^AC\d+\s*[:：]\s*/i, '')
+    .replace(CRITERION_LABEL_RE, '')
     .replace(/\r\n?/g, '\n')
     .replace(/\s+/g, '')
 }
@@ -896,30 +975,38 @@ function criterionCovered(row, expected) {
 /**
  * Resolve which expected criterion one result row may cover.
  *
- * The full criterion text is authoritative; `criterion_id` is auxiliary only. A
- * row covers a standard when its normalized text equals that standard's text —
- * and, if the row also carries an id, that id must agree with the matched
- * standard. A row whose text matches nothing covers nothing, even with a valid
- * AC id (an id alone must never substitute for the original text). When two
- * standards share identical text, the id disambiguates; otherwise it is
- * ambiguous and covers neither. Returns at most one target index.
+ * The AC id is the PRIMARY signal: a row whose `criterion_id` names a real
+ * criterion covers that criterion, regardless of how closely its `item` text
+ * paraphrases the original. This is what a *coverage* gate should measure — "did
+ * the arbiter rule on AC3?" — instead of "did it reproduce a 500-char sentence
+ * verbatim", which real model output almost never does and which produced mass
+ * false downgrades of audits whose every row was `pass`.
+ *
+ * Exact normalized-text equality is kept as a FALLBACK for rows that carry no
+ * usable id (older payloads, or the explicit-requirement path where the arbiter
+ * may omit ids). An unknown/out-of-range id does not by itself cover anything —
+ * it falls through to the text match, so a garbage id cannot stand in for a real
+ * review. Malformed rows with empty `item` never cover (they are surfaced as
+ * unverified/fail elsewhere). Returns at most one target index; one-to-one
+ * assignment is enforced by `matchCoverage`.
  */
 function rowTarget(row, expected) {
   const rowId = typeof row?.criterionId === 'string' ? row.criterionId.trim().toUpperCase() : ''
   const rowText = normalizeCriterionText(row?.item)
   if (rowText === '') return -1
+  // 1) id-primary: a valid in-range criterion_id is authoritative.
+  if (rowId !== '') {
+    const byId = expected.findIndex((exp) => exp.id.toUpperCase() === rowId)
+    if (byId !== -1) return byId
+  }
+  // 2) text fallback: exact normalized equality (normalized, label-stripped).
   const textMatches = []
   expected.forEach((exp, index) => {
     if (normalizeCriterionText(exp.text) === rowText) textMatches.push(index)
   })
-  if (textMatches.length === 0) return -1
-  if (textMatches.length === 1) {
-    const target = textMatches[0]
-    if (rowId !== '' && rowId !== expected[target].id.toUpperCase()) return -1
-    return target
-  }
-  // Duplicate texts: the id may disambiguate, otherwise the row is ambiguous.
-  if (rowId !== '') {
+  if (textMatches.length === 1) return textMatches[0]
+  // Duplicate texts: a valid id among them disambiguates, otherwise ambiguous.
+  if (textMatches.length > 1 && rowId !== '') {
     const byId = textMatches.find((index) => expected[index].id.toUpperCase() === rowId)
     if (byId !== undefined) return byId
   }
@@ -1155,20 +1242,31 @@ function normalizeFinalAudit(parsed, rawText, modelLabel, options = {}) {
     }
   }
 
-  // Host-side coverage gate. The expected list comes from the stored brief; a
-  // ready verdict that never ruled on one of those criteria is exactly the
-  // "unfixed item passed review" false pass this mode must stop. Matching is
-  // one-to-one so a single row cannot satisfy two standards.
+  // Host-side coverage gate. `expected` is the machine-checkable list the host can
+  // prove coverage against: the stored brief, or a structured list extracted from
+  // an explicit requirement. When neither exists (free-form requirement),
+  // `coverageEnforced` is false and the gate CANNOT judge completeness — that is
+  // disclosed explicitly below instead of silently passing as "verified".
   const expected = Array.isArray(options.expectedCriteria)
     ? options.expectedCriteria.filter((c) => c && typeof c.text === 'string' && c.text.trim() !== '')
     : []
+  const coverageEnforced = options.coverageEnforced !== false && expected.length > 0
   const coveredIndices = matchCoverage(coverageRows, expected)
   const uncovered = expected.filter((_exp, index) => !coveredIndices.has(index))
   if (uncovered.length > 0) {
+    // Under id-primary matching a missing criterion means the arbiter genuinely
+    // did not rule on it, so this stays a hard downgrade — never a mere warning.
     if (ruling === 'ready') ruling = 'need_more_evidence'
     const names = uncovered.map((c) => `${c.id}: ${c.text}`).join('；')
     requiredActions.push(`以下验收标准没有得到逐条结论或其结论为空，请补齐后重审：${names}`)
   }
+  // P2-2: only "the host had nothing to check against" becomes a warning, never a
+  // downgrade — downgrading a free-form audit would recreate the false-pass loop
+  // this gate exists to avoid. The protocol makes the main agent disclose it.
+  const coverageUnenforcedNote =
+    coverageEnforced || ruling === 'error'
+      ? ''
+      : '（本次为自由文本需求，宿主没有可机读的验收清单，未做逐条覆盖校验——结论仅来自裁决者的逐条判断）'
 
   // A session with no recorded tool call at all cannot have verified a file change
   // or a test run. A `ready` there is unsupported by evidence.
@@ -1194,13 +1292,19 @@ function normalizeFinalAudit(parsed, rawText, modelLabel, options = {}) {
 
   return {
     ruling,
-    summary: truncate(`${baseSummary}${coverageNote}`, 2000),
+    summary: truncate(`${baseSummary}${coverageNote}${coverageUnenforcedNote}`, 2000),
     criteria,
     blocking_issues: blocking,
     required_actions: requiredActions,
-    reasoning: truncate(typeof record.reasoning === 'string' ? record.reasoning : '', 4000),
+    // Keep the echoed reasoning/raw short on purpose. They duplicate `criteria`
+    // and, at 4k+12k, were pushing the serialized result past the tool-result
+    // pruner cap; the pruner then cut it mid-string into JSON the caller could
+    // not parse (observed as an unreadable ruling). See P1-2.
+    reasoning: truncate(typeof record.reasoning === 'string' ? record.reasoning : '', 1200),
     arbiter_model: modelLabel,
-    raw: truncate(rawText, 12000),
+    raw: truncate(rawText, 2000),
+    coverage_enforced: coverageEnforced,
+    escalated: false,
   }
 }
 
@@ -1411,6 +1515,8 @@ function makeFinalAuditTool(ctx, config, getRoutes) {
           reasoning: '',
           arbiter_model: '',
           raw: '',
+          coverage_enforced: false,
+          escalated: false,
         }
       }
       const briefSection =
@@ -1422,12 +1528,25 @@ function makeFinalAuditTool(ctx, config, getRoutes) {
       // Coverage is checked against the stored brief even when an explicit
       // requirement is supplied: passing a narrower excerpt must not hide a
       // criterion the brief already recorded (the "unfixed item passed" case).
-      // With no brief, fall back to a clearly-structured explicit list when one
-      // is present, so a numbered requirement is still gated host-side.
+      // With no brief, fall back to a clearly-structured explicit list when one is
+      // present; if the requirement is free-form prose with NO extractable list,
+      // the host genuinely cannot judge coverage, and that case is disclosed
+      // downstream instead of being silently treated as verified.
+      const extractedList = brief !== undefined ? [] : extractCriteriaFromRequirement(requirement)
       const expectedCriteria =
         brief !== undefined
           ? criteriaWithIds(brief.acceptance_criteria)
-          : criteriaWithIds(extractCriteriaFromRequirement(requirement))
+          : criteriaWithIds(extractedList)
+      const coverageEnforced = brief !== undefined || extractedList.length > 0
+      // When we DID extract a list from an explicit requirement, show it to the
+      // arbiter with AC ids so it returns matching `criterion_id`s — otherwise the
+      // host has an id-keyed expectation the child was never told about.
+      const extractedSection =
+        brief === undefined && extractedList.length > 0
+          ? `\n\n【系统补充：从 requirement 提取的验收清单（请逐条给结论，criterion_id 填对应编号）】\n${bulletList(
+              criteriaWithIds(extractedList).map((c) => `${c.id}: ${c.text}`),
+            )}`
+          : ''
 
       try {
         const { result, toolFactTotal } = await runChildWithRetry(
@@ -1435,7 +1554,7 @@ function makeFinalAuditTool(ctx, config, getRoutes) {
           exec,
           'cross-review-internal',
           routes.arbiter,
-          buildFinalAuditPrompt({ ...args, requirement: `${requirement}${briefSection}`, files }),
+          buildFinalAuditPrompt({ ...args, requirement: `${requirement}${briefSection}${extractedSection}`, files }),
           '交付审核',
           routeTimeout(routes.arbiter, config.reviewTimeoutMs),
           { outputSchema: FINAL_CHILD_SCHEMA },
@@ -1444,10 +1563,12 @@ function makeFinalAuditTool(ctx, config, getRoutes) {
         if (failure !== undefined) return errorFinalAudit(failure, modelLabel)
         const rawText = extractText(result)
         const parsed = structuredOf(result) ?? parseJsonLoose(rawText)
-        return normalizeFinalAudit(parsed, rawText, modelLabel, {
+        const audit = normalizeFinalAudit(parsed, rawText, modelLabel, {
           expectedCriteria,
+          coverageEnforced,
           noToolCalls: toolFactTotal === 0,
         })
+        return applyRoundCap(exec, audit)
       } catch (error) {
         return errorFinalAudit(
           `无法完成交付审核：${error instanceof Error ? error.message : String(error)}`,
@@ -1488,11 +1609,13 @@ ${statusSection}
 
 ### 任务结束时：cross_review_final（唯一的验收关）
 把交付声明与**可复现证据**（改了哪些文件、跑了什么命令、关键输出）交给裁决者。调用时可以不传 requirement，它会自动使用 brief 的验收标准；系统还会附带主会话真实的写操作/命令记录，你无法改写它——所以不要声称做过日志里没有的事。
-**提交前先自检**：对照每一条验收标准（AC1…）逐项准备「证据位置（文件+行号 / 截图 / 数据文件）、验证方法（命令或检查手段）、实际结果、必要执行环境（版本 / 端口 / 登录态等）」；把 open_questions 的用户答复与当前 assumptions 写进 context。已有失败、未完成动作或关键输出缺失时，先处理完再提交；证据不齐不要提交。裁决者会一次性返回**全部** fail / unverified 与 required_actions；请把它们**一次改完再复审**，不要只修一条就重审，避免多次打回。宿主会按完整原文校验每条验收标准是否被逐条覆盖，遗漏、空证据或未经工具验证不会被判 ready。
+**提交前先自检**：对照每一条验收标准（AC1…）逐项准备「证据位置（文件+行号 / 截图 / 数据文件）、验证方法（命令或检查手段）、实际结果、必要执行环境（版本 / 端口 / 登录态等）」；把 open_questions 的用户答复与当前 assumptions 写进 context。已有失败、未完成动作或关键输出缺失时，先处理完再提交；证据不齐不要提交。裁决者会一次性返回**全部** fail / unverified 与 required_actions；请把它们**一次改完再复审**，不要只修一条就重审，避免多次打回。宿主会用 AC 编号核对你是否对每条验收标准都给出了结论（**按编号核对，不要求逐字复制原文**）；漏项、空证据或未经工具验证不会被判 ready。
 - ready：才可以向用户宣布交付。
 - not_ready / need_more_evidence：按 required_actions 修完或补证据再审核，不要跳过直接报告完成。
 - error：审核本身没跑成（超时、模型故障、被取消、裁决者没给出可判定结论）。**这既不是通过也不是不通过**：要么重试一次，要么在最终回复里明确写出「交付审核未完成，以下为未复核内容」。
 - skipped：该职责已在设置中关闭，本次**没有审核**。不要把它当成通过：最终回复里要说明「本次未走交叉复核」。
+- **coverage_enforced=false**：本次是自由文本需求，宿主没有可机读的验收清单、**未做逐条覆盖校验**。这不是通过也不是不通过；最终回复里必须说明「本次未做逐条覆盖校验，仅依据裁决者的逐条判断」。
+- **escalated=true**：已连续多轮 need_more_evidence 且没有任何 fail 项，通常是当前环境补不齐证据（缺账号 / 生产环境 / 不可复现），不是代码缺陷。**不要再重复提交 cross_review_final**：直接把无法验证的项与各自的环境原因告诉用户，请用户决定是否接受或提供条件。
 
 ### 行为准则
 - 先证据后结论；不确定就说不确定并补验证。验收判定交给裁决者，你只提供可复现证据（命令 + 输出 + 文件路径），不自行下验收结论。
@@ -1534,9 +1657,11 @@ export {
   FINAL_CHILD_RULINGS,
   FINAL_TOOL_RULINGS,
   FINAL_TOOL_SCHEMA,
+  ROUND_CAP,
   TIMEOUT_MAX_MS,
   TIMEOUT_MIN_MS,
   RETRYABLE_ERROR,
+  applyRoundCap,
   buildBriefPrompt,
   buildFinalAuditPrompt,
   buildProtocol,
@@ -1553,6 +1678,7 @@ export {
   parseExitCode,
   rowTarget,
   skippedFinalAudit,
+  stripCriterionLabel,
   summarizeToolFacts,
   renderToolFacts,
   renderBriefSpec,

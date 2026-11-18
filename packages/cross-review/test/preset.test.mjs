@@ -6,6 +6,8 @@ import {
   FINAL_CHILD_RULINGS,
   FINAL_TOOL_RULINGS,
   FINAL_TOOL_SCHEMA,
+  ROUND_CAP,
+  applyRoundCap,
   buildProtocol,
   buildFinalAuditPrompt,
   clipMiddle,
@@ -23,6 +25,7 @@ import {
   renderToolFacts,
   routeOf,
   skippedFinalAudit,
+  stripCriterionLabel,
   summarizeToolFacts,
 } from '../preset.js'
 
@@ -468,15 +471,16 @@ test('a ready with no per-criterion rows is not a verified pass', () => {
   assert.equal(ok.ruling, 'ready')
 })
 
-test('one row cannot cover two criteria (id/text cross-collision)', () => {
+test('one row cannot cover two criteria (id-primary stays one-to-one)', () => {
   const expectedCriteria = criteriaWithIds(['A', 'B', 'C'])
   const audit = normalizeFinalAudit(
     {
       ruling: 'ready',
       criteria: [
-        // criterion_id says AC3 but the text is criterion A: ambiguous, covers none.
-        { criterion_id: 'AC3', item: 'A', status: 'pass', evidence: 'e' },
-        { item: 'B', status: 'pass', evidence: 'e' },
+        // Both rows claim AC1; one-to-one means only one may cover it, so B and C
+        // must still be reported missing even though a row's text also says A.
+        { criterion_id: 'AC1', item: 'A', status: 'pass', evidence: 'e' },
+        { criterion_id: 'AC1', item: 'A again', status: 'pass', evidence: 'e' },
       ],
     },
     '',
@@ -484,7 +488,7 @@ test('one row cannot cover two criteria (id/text cross-collision)', () => {
     { expectedCriteria },
   )
   assert.equal(audit.ruling, 'need_more_evidence')
-  assert.match(audit.required_actions.join('\n'), /AC1: A/)
+  assert.match(audit.required_actions.join('\n'), /AC2: B/)
   assert.match(audit.required_actions.join('\n'), /AC3: C/)
 })
 
@@ -521,7 +525,7 @@ test('long criteria are compared on full text (not after the 500-char display tr
   assert.match(audit.summary, /1 条验收标准未逐条覆盖/)
 })
 
-test('an id alone cannot cover a criterion when the text is unrelated', () => {
+test('an unknown criterion_id falls back to text and cannot cover by itself', () => {
   const expectedCriteria = criteriaWithIds(['A', 'B', 'C'])
   const audit = normalizeFinalAudit(
     {
@@ -529,8 +533,9 @@ test('an id alone cannot cover a criterion when the text is unrelated', () => {
       criteria: [
         { item: 'A', status: 'pass', evidence: 'e' },
         { item: 'B', status: 'pass', evidence: 'e' },
-        // Valid AC3 id but unrelated text D: C must still be reported missing.
-        { criterion_id: 'AC3', item: 'D', status: 'pass', evidence: 'e' },
+        // Out-of-range id (AC9) must NOT cover any real criterion; its unrelated
+        // text D matches nothing either, so C is still missing.
+        { criterion_id: 'AC9', item: 'D', status: 'pass', evidence: 'e' },
       ],
     },
     '',
@@ -607,4 +612,134 @@ test('controlled scope: partial fixes never pass (topbar / iframe / KPI)', () =>
     { expectedCriteria },
   )
   assert.equal(done.ruling, 'ready')
+})
+
+// ---------------------------------------------------------------------------
+// P0-1: id-primary coverage + robust label stripping.
+// ---------------------------------------------------------------------------
+
+test('criteriaWithIds strips an embedded AC label so the body is compared', () => {
+  const withIds = criteriaWithIds(['AC1 详情弹窗初始状态=隐藏', 'AC2（配色）：顶栏为 #ebeef3'])
+  assert.deepEqual(withIds, [
+    { id: 'AC1', text: '详情弹窗初始状态=隐藏' },
+    { id: 'AC2', text: '顶栏为 #ebeef3' },
+  ])
+  // Rendering therefore does not double-label.
+  const text = renderBriefSpec({
+    goal: 'g',
+    in_scope: [],
+    out_of_scope: [],
+    acceptance_criteria: ['AC1 详情弹窗初始状态=隐藏'],
+  })
+  assert.match(text, /AC1: 详情弹窗初始状态=隐藏/)
+  assert.doesNotMatch(text, /AC1: AC1/)
+})
+
+test('normalizeCriterionText strips the space, colon and parenthetical label forms', () => {
+  const body = normalizeCriterionText('详情弹窗初始状态=隐藏')
+  assert.equal(normalizeCriterionText('AC1 详情弹窗初始状态=隐藏'), body) // bare space
+  assert.equal(normalizeCriterionText('AC7：详情弹窗初始状态=隐藏'), body) // full-width colon
+  assert.equal(normalizeCriterionText('AC3（提示文案位置）：详情弹窗初始状态=隐藏'), body) // tag
+  // A genuine token that merely starts with AC+digits must NOT be stripped.
+  assert.equal(stripCriterionLabel('AC220V 电源'), 'AC220V 电源')
+})
+
+test('an id-primary row covers its criterion even when the text is paraphrased', () => {
+  const expectedCriteria = criteriaWithIds([
+    'AC1 详情弹窗初始状态=隐藏：初始 HTML 不出现明文密钥',
+    'AC2 「显示」返回真实明文：与重置时一次性展示逐字符一致',
+  ])
+  const audit = normalizeFinalAudit(
+    {
+      ruling: 'ready',
+      criteria: [
+        // Paraphrased and much shorter than the source, but the id is right.
+        { criterion_id: 'AC1', item: '弹窗默认隐藏，无明文', status: 'pass', evidence: 'read detail.html:28' },
+        { criterion_id: 'AC2', item: '显示得到真实明文', status: 'pass', evidence: 'hex 对比一致' },
+      ],
+    },
+    '',
+    'm',
+    { expectedCriteria, coverageEnforced: true },
+  )
+  assert.equal(audit.ruling, 'ready')
+  assert.equal(audit.coverage_enforced, true)
+})
+
+// ---------------------------------------------------------------------------
+// P0-2 / P2-2: free-form requirement is disclosed, never silently "verified".
+// ---------------------------------------------------------------------------
+
+test('a free-form requirement is disclosed as coverage-not-enforced, not silently passed', () => {
+  const audit = normalizeFinalAudit(
+    { ruling: 'ready', criteria: [{ item: '能登录', status: 'pass', evidence: 'curl 200' }] },
+    '',
+    'm',
+    { expectedCriteria: [], coverageEnforced: false },
+  )
+  // It may still be ready (the arbiter did review), but the caller is told the
+  // host could not machine-check completeness.
+  assert.equal(audit.coverage_enforced, false)
+  assert.match(audit.summary, /未做逐条覆盖校验/)
+})
+
+test('when coverage IS enforced and a criterion is missing, it stays a hard downgrade', () => {
+  const expectedCriteria = criteriaWithIds(['A', 'B'])
+  const audit = normalizeFinalAudit(
+    { ruling: 'ready', criteria: [{ criterion_id: 'AC1', item: 'A', status: 'pass', evidence: 'e' }] },
+    '',
+    'm',
+    { expectedCriteria, coverageEnforced: true },
+  )
+  assert.equal(audit.ruling, 'need_more_evidence')
+  assert.equal(audit.coverage_enforced, true)
+  assert.match(audit.required_actions.join('\n'), /AC2: B/)
+})
+
+// ---------------------------------------------------------------------------
+// P1-1: read-only forensics guidance in the audit prompt.
+// ---------------------------------------------------------------------------
+
+test('the final audit prompt warns that some cmdlets are sandbox-limited and lists safe ones', () => {
+  const text = buildFinalAuditPrompt({ requirement: 'AC1: A', claim: 'done' })
+  assert.match(text, /只读取证命令/)
+  assert.match(text, /不代表被检查的对象异常/)
+  assert.match(text, /netstat -ano/)
+  assert.match(text, /tasklist/)
+  // It must not tell the arbiter to reproduce the item verbatim any more.
+  assert.doesNotMatch(text, /item 与原文一致/)
+})
+
+// ---------------------------------------------------------------------------
+// P2-1: round cap escalates evidence-only loops to the user.
+// ---------------------------------------------------------------------------
+
+test('applyRoundCap escalates after consecutive evidence-only need_more_evidence rounds', () => {
+  const exec = { agent: { session: { id: 'round-cap-session' } } }
+  const makeAudit = () => ({
+    ruling: 'need_more_evidence',
+    criteria: [{ item: 'AC3 生产库执行', status: 'unverified', evidence: '缺生产库' }],
+    blocking_issues: [],
+    required_actions: ['补生产库证据'],
+    escalated: false,
+  })
+  for (let i = 1; i < ROUND_CAP; i += 1) {
+    const a = applyRoundCap(exec, makeAudit())
+    assert.equal(a.escalated, false, `round ${i} must not escalate yet`)
+  }
+  const escalated = applyRoundCap(exec, makeAudit())
+  assert.equal(escalated.escalated, true)
+  assert.match(escalated.required_actions.join('\n'), /停止重复提交 cross_review_final/)
+
+  // A real fail (or a ready) resets the counter.
+  const failAudit = {
+    ruling: 'not_ready',
+    criteria: [{ item: 'x', status: 'fail', evidence: 'boom' }],
+    blocking_issues: [],
+    required_actions: [],
+    escalated: false,
+  }
+  applyRoundCap(exec, failAudit)
+  const afterReset = applyRoundCap(exec, makeAudit())
+  assert.equal(afterReset.escalated, false, 'a fail must reset the strike counter')
 })

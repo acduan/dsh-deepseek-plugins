@@ -221,3 +221,31 @@ test('the preset mirrors the shipped standard capabilities', (t) => {
   const control = delegation.config.find((plugin) => plugin.id === 'tool-subagent-control')
   assert.equal(control.config.interrupt, false)
 })
+
+test('the audit result is not truncated by an 8 KB pruner (raise the cap)', (t) => {
+  if (yaml === undefined) {
+    t.skip('js-yaml not resolvable from this profile')
+    return
+  }
+  const preset = parsePatch()[0].insert.find((row) => row.id === 'preset-cross-review')
+  const compaction = preset.config.plugins.find((plugin) => plugin.id === 'compaction')
+  const pruner = compaction.config.find((plugin) => plugin.id === 'tool-result-pruner')
+  // A ~17-criterion audit serialises well past 8 KB; the shipped 8192 default cut
+  // the JSON mid-string and the caller could not parse the ruling. Keep it large
+  // enough for one whole audit result in the head slice.
+  assert.ok(pruner.config.thresholdChars >= 16384, 'thresholdChars must be raised above 8 KB')
+  assert.ok(pruner.config.headChars >= 16384, 'headChars must hold a whole audit result')
+})
+
+test('the internal arbiter persona carries the read-only forensics guidance', (t) => {
+  if (yaml === undefined) {
+    t.skip('js-yaml not resolvable from this profile')
+    return
+  }
+  const internal = parsePatch()[0].insert.find((row) => row.id === 'preset-cross-review-internal')
+  const persona = internal.config.plugins.find((plugin) => plugin.id === 'persona')
+  const prefix = persona.config.prefix
+  assert.match(prefix, /ConstrainedLanguage/)
+  assert.match(prefix, /不代表被检查的对象异常/)
+  assert.match(prefix, /netstat -ano/)
+})
