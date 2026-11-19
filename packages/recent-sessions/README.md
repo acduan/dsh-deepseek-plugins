@@ -2,8 +2,6 @@
 
 左侧栏“最近会话”面板（dsh Web 客户端 bundle 插件）。
 
-![demo](docs/recent-sessions.png)
-
 ## 功能
 
 - 左侧栏“最近会话”折叠列表：约 150px 高、可滚动、可展开/折叠；

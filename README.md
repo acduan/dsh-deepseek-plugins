@@ -39,10 +39,6 @@ packages/
 
 默认复核模型为 **Hy4 · WorkBuddy**，默认裁决模型为 **GPT-6.1 Sol · PackyCode1**，可在设置页改为当前 DSH 任意可用模型。
 
-![交叉复核模式设置页](docs/cross-review-settings.png)
-
-![模型下拉列表](docs/cross-review-models.png)
-
 细节见 [packages/cross-review/README.md](packages/cross-review/README.md)。
 
 ## dsh 插件规范 / 目录结构
