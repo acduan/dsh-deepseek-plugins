@@ -7,6 +7,7 @@ packages/
   recent-sessions/       左侧栏“最近会话”面板
   token-daily-stats/     Token 用量统计（设置页）
   cross-review/          交叉复核模式：预设 + 复核工具 + 模型设置页（单一插件）
+  dsh-bloom-color/       主题色（仅配色）：Bloom 莫兰迪 15 套 + dsh-theme-palette 4 套 + 调色板切换器
 ```
 
 ## 插件
@@ -40,6 +41,17 @@ packages/
 默认复核模型为 **Hy4 · WorkBuddy**，默认裁决模型为 **GPT-6.1 Sol · PackyCode1**，可在设置页改为当前 DSH 任意可用模型。
 
 细节见 [packages/cross-review/README.md](packages/cross-review/README.md)。
+
+### 4) dsh-bloom-color — `@local/dsh-bloom-color`
+
+**主题色（仅配色）** bundle：把 [dsh-bloom-theme](https://github.com/webkubor/dsh-bloom-theme) 的主题色能力单独取出，并集成 [dsh-theme-palette](https://github.com/zuoyunlai/dsh-theme-palette) 的 4 套预设。
+
+- 19 套配色：Bloom 莫兰迪 15 套（OKLCH）+ dsh-theme-palette 4 套（黑白 / 暖砂 / 靛蓝 / 苔绿）；
+- 覆盖宿主 `--dsw-alias-*` / `--dsw-specific-*` / `--dsw-static-*` 语义色 token，随宿主 `body[data-ds-dark-theme]` 自动明暗切换；
+- 右下角调色板切换器（分两组），选择存 `localStorage`；
+- 纯前端配色：无遥测、无更新检测、无反馈/分享、无玻璃/星空/动效；Node 侧空实现、无网络请求。
+
+细节见 [packages/dsh-bloom-color/README.md](packages/dsh-bloom-color/README.md)。
 
 ## dsh 插件规范 / 目录结构
 
