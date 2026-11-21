@@ -4,7 +4,7 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "description": "主题色（仅配色）：15 套 Bloom 莫兰迪（OKLCH）+ 4 套 dsh-theme-palette 预设（黑白/暖砂/靛蓝/苔绿），明暗自适应 + 调色板切换器。不含遥测、更新检测、反馈、玻璃/星空/动效等其它功能。",
+  "description": "主题色（仅配色）：默认（DSH 原色）+ 15 套 Bloom 莫兰迪（OKLCH）+ 4 套 dsh-theme-palette 预设（黑白/暖砂/靛蓝/苔绿），明暗自适应 + 调色板切换器。不含遥测、更新检测、反馈、玻璃/星空/动效等其它功能。",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

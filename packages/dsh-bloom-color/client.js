@@ -180,6 +180,7 @@ window.__ModuleLoader__.load({
     var TP_LABEL_EN = { mono: 'Neutral', warm: 'Warm Sand', indigo: 'Indigo', moss: 'Moss' };
     function isTp(v) { return typeof v === 'string' && v.slice(0, 3) === 'tp-' && THEME_PALETTE[v.slice(3)] !== undefined; }
     function tpLabel(v) { var it = THEME_PALETTE[v.slice(3)]; if (!it) return v; return IS_ZH ? it.label : (TP_LABEL_EN[v.slice(3)] || it.label); }
+    function displayLabel(v) { if (v === 'default') return IS_ZH ? '默认（DSH 原色）' : 'Default (DSH)'; return isTp(v) ? tpLabel(v) : label(v); }
 
     var mix = function (c, p) { return 'color-mix(in oklch, ' + c + ', transparent ' + p + '%)'; };
     var readableAccent = function (p, dark) { return dark ? p.accentD : 'color-mix(in oklch, ' + p.accentL + ' 88%, black)'; };
@@ -532,13 +533,14 @@ window.__ModuleLoader__.load({
     }
 
     function readVariant() {
-      try { var v = window.localStorage.getItem(STORAGE_KEY); return (VARIANTS.indexOf(v) >= 0 || isTp(v)) ? v : 'mist'; }
+      try { var v = window.localStorage.getItem(STORAGE_KEY); return (VARIANTS.indexOf(v) >= 0 || isTp(v) || v === 'default') ? v : 'mist'; }
       catch (e) { return 'mist'; }
     }
     function writeVariant(v) { try { window.localStorage.setItem(STORAGE_KEY, v); } catch (e) {} }
     function applyVariant(v) { if (document.body) document.body.setAttribute('data-bloom-variant', v); }
 
     function swatch(v) {
+      if (v === 'default') return 'linear-gradient(135deg, #679efe 0 52%, #eef1f4 52% 100%)';
       if (isTp(v)) {
         var tp = THEME_PALETTE[v.slice(3)];
         var acc = tp.light['--dsw-alias-brand-primary'] || '#888';
@@ -580,6 +582,8 @@ window.__ModuleLoader__.load({
       function addGroup(text) {
         var g = document.createElement('div'); g.className = 'bloomc-group'; g.textContent = text; panel.appendChild(g);
       }
+      addGroup(IS_ZH ? '系统' : 'System');
+      addItem('default', IS_ZH ? '默认（DSH 原色）' : 'Default (DSH)');
       addGroup(IS_ZH ? 'Bloom · 莫兰迪' : 'Bloom · Morandi');
       VARIANTS.forEach(function (v) { addItem(v, label(v)); });
       addGroup('dsh-theme-palette');
@@ -588,7 +592,7 @@ window.__ModuleLoader__.load({
       function refresh() {
         var v = getVariant();
         dot.style.background = swatch(v);
-        txt.textContent = isTp(v) ? tpLabel(v) : label(v);
+        txt.textContent = displayLabel(v);
         for (var k in items) {
           if (k === v) items[k].setAttribute('data-active', '');
           else items[k].removeAttribute('data-active');
