@@ -46,7 +46,7 @@ packages/
 
 **主题色（仅配色）** bundle：把 [dsh-bloom-theme](https://github.com/webkubor/dsh-bloom-theme) 的主题色能力单独取出，并集成 [dsh-theme-palette](https://github.com/zuoyunlai/dsh-theme-palette) 的 4 套预设。
 
-- 配色选择含「默认（DSH 原色）」，外加 19 套配色：Bloom 莫兰迪 15 套（OKLCH）+ dsh-theme-palette 4 套（黑白 / 暖砂 / 靛蓝 / 苔绿）；
+- 配色选择含「默认（DSH 原色）」「暖白（DSH，背景 #FDF5EC）」，外加 19 套配色：Bloom 莫兰迪 15 套（OKLCH）+ dsh-theme-palette 4 套（黑白 / 暖砂 / 靛蓝 / 苔绿）；
 - 覆盖宿主 `--dsw-alias-*` / `--dsw-specific-*` / `--dsw-static-*` 语义色 token，随宿主 `body[data-ds-dark-theme]` 自动明暗切换；
 - 右下角调色板切换器（分「系统 / Bloom · 莫兰迪 / dsh-theme-palette」三组），选择存 `localStorage`；
 - 纯前端配色：无遥测、无更新检测、无反馈/分享、无玻璃/星空/动效；Node 侧空实现、无网络请求。

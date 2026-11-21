@@ -180,7 +180,7 @@ window.__ModuleLoader__.load({
     var TP_LABEL_EN = { mono: 'Neutral', warm: 'Warm Sand', indigo: 'Indigo', moss: 'Moss' };
     function isTp(v) { return typeof v === 'string' && v.slice(0, 3) === 'tp-' && THEME_PALETTE[v.slice(3)] !== undefined; }
     function tpLabel(v) { var it = THEME_PALETTE[v.slice(3)]; if (!it) return v; return IS_ZH ? it.label : (TP_LABEL_EN[v.slice(3)] || it.label); }
-    function displayLabel(v) { if (v === 'default') return IS_ZH ? '默认（DSH 原色）' : 'Default (DSH)'; return isTp(v) ? tpLabel(v) : label(v); }
+    function displayLabel(v) { if (v === 'default') return IS_ZH ? '默认（DSH 原色）' : 'Default (DSH)'; if (v === 'warm-white') return IS_ZH ? '暖白（DSH）' : 'Warm White (DSH)'; return isTp(v) ? tpLabel(v) : label(v); }
 
     var mix = function (c, p) { return 'color-mix(in oklch, ' + c + ', transparent ' + p + '%)'; };
     var readableAccent = function (p, dark) { return dark ? p.accentD : 'color-mix(in oklch, ' + p.accentL + ' 88%, black)'; };
@@ -497,6 +497,8 @@ window.__ModuleLoader__.load({
         db.push('}');
         blocks.push(lb.join('\n'), db.join('\n'));
       }
+      // DSH 原生配色，仅把页面背景改为暖白；其余 token 一律不覆盖（返回 DSH 默认）。
+      blocks.push('/* DSH native · warm-white background only */\nbody:not([data-ds-dark-theme])[data-bloom-variant="warm-white"] { --dsw-alias-bg-base: #FDF5EC; }');
       return blocks.join('\n');
     }
 
@@ -508,14 +510,16 @@ window.__ModuleLoader__.load({
       '.bloomc-btn:hover{border-color:var(--bloom-accent,var(--dsw-alias-brand-primary,#888))}',
       '.bloomc-dot{width:16px;height:16px;border-radius:50%;border:1px solid rgba(0,0,0,.2);flex:none}',
       '.bloomc-btn-text{font-size:12.5px;font-weight:600;letter-spacing:.3px;white-space:nowrap}',
-      '.bloomc-panel{position:absolute;right:0;bottom:46px;width:262px;padding:9px;border-radius:14px;display:grid;grid-template-columns:repeat(3,1fr);gap:6px;background:color-mix(in oklch,var(--dsw-alias-bg-layer-2,#fff),transparent 4%);border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.15));box-shadow:0 14px 36px rgba(0,0,0,.30);backdrop-filter:blur(18px) saturate(1.3);-webkit-backdrop-filter:blur(18px) saturate(1.3)}',
+      '.bloomc-panel{position:absolute;right:0;bottom:46px;width:262px;padding:9px;border-radius:14px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;background:color-mix(in oklch,var(--dsw-alias-bg-layer-2,#fff),transparent 4%);border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.15));box-shadow:0 14px 36px rgba(0,0,0,.30);backdrop-filter:blur(18px) saturate(1.3);-webkit-backdrop-filter:blur(18px) saturate(1.3)}',
       '.bloomc-panel[hidden]{display:none}',
       '.bloomc-item{display:flex;flex-direction:column;align-items:center;gap:5px;padding:7px 3px;border-radius:9px;border:1px solid transparent;background:transparent;cursor:pointer;color:var(--dsw-alias-label-secondary,#555);font:11px/1.2 inherit}',
       '.bloomc-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(120,120,120,.12))}',
       '.bloomc-item[data-active]{border-color:var(--bloom-accent,var(--dsw-alias-brand-primary,#888));color:var(--dsw-alias-label-primary,#222)}',
       '.bloomc-sw{width:26px;height:26px;border-radius:50%;border:1px solid rgba(0,0,0,.18);box-shadow:inset 0 0 0 1px rgba(255,255,255,.28)}',
       '.bloomc-group{grid-column:1/-1;font-size:10.5px;letter-spacing:.4px;color:var(--dsw-alias-label-tertiary,#8a8a8a);padding:5px 2px 1px;font-weight:600}',
-      '.bloomc-name{white-space:nowrap}'
+      '.bloomc-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}',
+      '.bloomc-item-wide{grid-column:1/-1;flex-direction:row;justify-content:center;gap:8px;padding:8px 6px}',
+      '.bloomc-item-wide .bloomc-name{max-width:none}'
     ].join('\n');
 
     // ── 注入 / 状态 ────────────────────────────────────────────────────────
@@ -533,7 +537,7 @@ window.__ModuleLoader__.load({
     }
 
     function readVariant() {
-      try { var v = window.localStorage.getItem(STORAGE_KEY); return (VARIANTS.indexOf(v) >= 0 || isTp(v) || v === 'default') ? v : 'mist'; }
+      try { var v = window.localStorage.getItem(STORAGE_KEY); return (VARIANTS.indexOf(v) >= 0 || isTp(v) || v === 'default' || v === 'warm-white') ? v : 'mist'; }
       catch (e) { return 'mist'; }
     }
     function writeVariant(v) { try { window.localStorage.setItem(STORAGE_KEY, v); } catch (e) {} }
@@ -541,6 +545,7 @@ window.__ModuleLoader__.load({
 
     function swatch(v) {
       if (v === 'default') return 'linear-gradient(135deg, #679efe 0 52%, #eef1f4 52% 100%)';
+      if (v === 'warm-white') return 'linear-gradient(135deg, #679efe 0 52%, #fdf5ec 52% 100%)';
       if (isTp(v)) {
         var tp = THEME_PALETTE[v.slice(3)];
         var acc = tp.light['--dsw-alias-brand-primary'] || '#888';
@@ -569,7 +574,7 @@ window.__ModuleLoader__.load({
       var items = {};
       function addItem(id, labelText) {
         var it = document.createElement('button');
-        it.type = 'button'; it.className = 'bloomc-item'; it.setAttribute('role', 'option');
+        it.type = 'button'; var wide = (id === 'default' || id === 'warm-white'); it.className = 'bloomc-item' + (wide ? ' bloomc-item-wide' : ''); it.setAttribute('role', 'option');
         it.title = labelText;
         var sw = document.createElement('span'); sw.className = 'bloomc-sw'; sw.style.background = swatch(id);
         var nm = document.createElement('span'); nm.className = 'bloomc-name'; nm.textContent = labelText;
@@ -584,6 +589,7 @@ window.__ModuleLoader__.load({
       }
       addGroup(IS_ZH ? '系统' : 'System');
       addItem('default', IS_ZH ? '默认（DSH 原色）' : 'Default (DSH)');
+      addItem('warm-white', IS_ZH ? '暖白（DSH）' : 'Warm White (DSH)');
       addGroup(IS_ZH ? 'Bloom · 莫兰迪' : 'Bloom · Morandi');
       VARIANTS.forEach(function (v) { addItem(v, label(v)); });
       addGroup('dsh-theme-palette');
