@@ -1,6 +1,6 @@
 {
   "name": "@local/recent-sessions",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Collapsible recent-sessions list for the left sidebar.",

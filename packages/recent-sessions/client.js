@@ -61,6 +61,18 @@ window.__ModuleLoader__.load({
     const EXPANDED_HEIGHT = 186;
     /** Collapsed panel height: 32px header + 4px bottom padding. */
     const COLLAPSED_HEIGHT = 36;
+    /** Recent-sessions panel : workspace panel vertical split (panel = 35%, workspace = 65%). */
+    const SPLIT_RATIO = 0.35;
+    const MIN_EXPANDED_HEIGHT = 100;
+    const MIN_WORKSPACE_HEIGHT = 120;
+
+    /** Panel height for the intended 35/65 split of the available sidebar area. */
+    function computeExpandedHeight(total) {
+      if (!total || !isFinite(total) || total <= 0) return EXPANDED_HEIGHT;
+      const target = Math.round(total * SPLIT_RATIO);
+      const maxH = Math.max(MIN_EXPANDED_HEIGHT, total - MIN_WORKSPACE_HEIGHT);
+      return Math.min(Math.max(MIN_EXPANDED_HEIGHT, target), maxH);
+    }
 
     const CSS = [
       '.rsx-root{position:fixed;top:0;left:0;width:264px;z-index:40;pointer-events:auto;box-sizing:border-box;',
@@ -370,6 +382,7 @@ window.__ModuleLoader__.load({
       const tw = typeof props.tw === 'function' ? props.tw : (key) => key;
       const t = typeof props.t === 'function' ? props.t : (key) => key;
       const [collapsed, setCollapsed] = React.useState(false);
+      const [panelHeight, setPanelHeight] = React.useState(EXPANDED_HEIGHT);
       const [rect, setRect] = React.useState(null);
       const [tip, setTip] = React.useState(null);
       const [renameState, setRenameState] = React.useState(renameStore ? renameStore.get() : null);
@@ -482,12 +495,20 @@ window.__ModuleLoader__.load({
       // Reserve real layout space above the workspace browser and keep the
       // fixed section aligned with that reserved band.
       React.useEffect(() => {
-        const height = collapsed ? COLLAPSED_HEIGHT : EXPANDED_HEIGHT;
         let region = null;
         let observer = null;
         let scrollport = null;
         let onScroll = null;
         const measure = () => {
+          const rgn = findWorkspaceRegion();
+          if (!rgn) { setRect(null); return; }
+          const sp = rgn.parentElement && rgn.parentElement.hasAttribute('data-sidebar-scrollport') ? rgn.parentElement : null;
+          let height = COLLAPSED_HEIGHT;
+          if (!collapsed) {
+            const total = sp ? sp.getBoundingClientRect().height : rgn.getBoundingClientRect().height;
+            height = computeExpandedHeight(total);
+          }
+          setPanelHeight(height);
           const result = reserveSpace(height);
           if (!result) { setRect(null); return; }
           region = result.region;
@@ -548,11 +569,12 @@ window.__ModuleLoader__.load({
         h('span', { className: 'rsx-title' }, t('title')),
         h('span', { className: 'rsx-count' }, String(rows.length)));
 
+      const listHeight = Math.max(48, panelHeight - 36);
       let body = null;
       if (!collapsed) {
         body = rows.length === 0
-          ? h('div', { className: 'rsx-empty' }, t('empty'))
-          : h('div', { className: 'rsx-list', role: 'tree', ref: listRef, onScroll: () => setTip(null) },
+          ? h('div', { className: 'rsx-empty', style: { height: listHeight + 'px' } }, t('empty'))
+          : h('div', { className: 'rsx-list', role: 'tree', ref: listRef, style: { height: listHeight + 'px' }, onScroll: () => setTip(null) },
               rows.slice(0, 100).map((row) => {
                 const primary = row.statuses[0];
                 const baseProps = {
