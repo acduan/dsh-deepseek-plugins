@@ -180,7 +180,7 @@ window.__ModuleLoader__.load({
     var TP_LABEL_EN = { mono: 'Neutral', warm: 'Warm Sand', indigo: 'Indigo', moss: 'Moss' };
     function isTp(v) { return typeof v === 'string' && v.slice(0, 3) === 'tp-' && THEME_PALETTE[v.slice(3)] !== undefined; }
     function tpLabel(v) { var it = THEME_PALETTE[v.slice(3)]; if (!it) return v; return IS_ZH ? it.label : (TP_LABEL_EN[v.slice(3)] || it.label); }
-    function displayLabel(v) { if (v === 'default') return IS_ZH ? '默认（DSH 原色）' : 'Default (DSH)'; if (v === 'warm-white') return IS_ZH ? '暖白（DSH）' : 'Warm White (DSH)'; return isTp(v) ? tpLabel(v) : label(v); }
+    function displayLabel(v) { if (v === 'default') return IS_ZH ? '默认（DSH 原色）' : 'Default (DSH)'; return isTp(v) ? tpLabel(v) : label(v); }
 
     var mix = function (c, p) { return 'color-mix(in oklch, ' + c + ', transparent ' + p + '%)'; };
     var readableAccent = function (p, dark) { return dark ? p.accentD : 'color-mix(in oklch, ' + p.accentL + ' 88%, black)'; };
@@ -497,8 +497,6 @@ window.__ModuleLoader__.load({
         db.push('}');
         blocks.push(lb.join('\n'), db.join('\n'));
       }
-      // DSH 原生配色，仅把页面背景改为暖白；其余 token 一律不覆盖（返回 DSH 默认）。
-      blocks.push('/* DSH native · warm-white background only */\nbody:not([data-ds-dark-theme])[data-bloom-variant="warm-white"] { --dsw-alias-bg-base: #FDF5EC; }');
       return blocks.join('\n');
     }
 
@@ -537,7 +535,7 @@ window.__ModuleLoader__.load({
     }
 
     function readVariant() {
-      try { var v = window.localStorage.getItem(STORAGE_KEY); return (VARIANTS.indexOf(v) >= 0 || isTp(v) || v === 'default' || v === 'warm-white') ? v : 'mist'; }
+      try { var v = window.localStorage.getItem(STORAGE_KEY); return (VARIANTS.indexOf(v) >= 0 || isTp(v) || v === 'default') ? v : 'mist'; }
       catch (e) { return 'mist'; }
     }
     function writeVariant(v) { try { window.localStorage.setItem(STORAGE_KEY, v); } catch (e) {} }
@@ -545,7 +543,6 @@ window.__ModuleLoader__.load({
 
     function swatch(v) {
       if (v === 'default') return 'linear-gradient(135deg, #679efe 0 52%, #eef1f4 52% 100%)';
-      if (v === 'warm-white') return 'linear-gradient(135deg, #679efe 0 52%, #fdf5ec 52% 100%)';
       if (isTp(v)) {
         var tp = THEME_PALETTE[v.slice(3)];
         var acc = tp.light['--dsw-alias-brand-primary'] || '#888';
@@ -574,7 +571,7 @@ window.__ModuleLoader__.load({
       var items = {};
       function addItem(id, labelText) {
         var it = document.createElement('button');
-        it.type = 'button'; var wide = (id === 'default' || id === 'warm-white'); it.className = 'bloomc-item' + (wide ? ' bloomc-item-wide' : ''); it.setAttribute('role', 'option');
+        it.type = 'button'; var wide = (id === 'default'); it.className = 'bloomc-item' + (wide ? ' bloomc-item-wide' : ''); it.setAttribute('role', 'option');
         it.title = labelText;
         var sw = document.createElement('span'); sw.className = 'bloomc-sw'; sw.style.background = swatch(id);
         var nm = document.createElement('span'); nm.className = 'bloomc-name'; nm.textContent = labelText;
@@ -589,7 +586,6 @@ window.__ModuleLoader__.load({
       }
       addGroup(IS_ZH ? '系统' : 'System');
       addItem('default', IS_ZH ? '默认（DSH 原色）' : 'Default (DSH)');
-      addItem('warm-white', IS_ZH ? '暖白（DSH）' : 'Warm White (DSH)');
       addGroup(IS_ZH ? 'Bloom · 莫兰迪' : 'Bloom · Morandi');
       VARIANTS.forEach(function (v) { addItem(v, label(v)); });
       addGroup('dsh-theme-palette');

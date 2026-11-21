@@ -4,7 +4,6 @@
 
 ## 包含
 - **默认（DSH 原色）**：不注入任何配色覆盖，回到 DSH 原生配色（含明暗）。
-- **暖白（DSH）**：在 DSH 原生配色基础上，仅把页面背景改为 `#FDF5EC`（其余颜色不变；深色模式保持原生）。
 - **Bloom 莫兰迪 15 套**（OKLCH）：mist / cinnabar / petal / ripple / sage / stone / lapis / amber / aurora / lavender / mint / tangerine / silverrose / dawn / osmanthus。
 - **dsh-theme-palette 4 套预设**：黑白（Neutral）/ 暖砂（Warm Sand）/ 靛蓝（Indigo）/ 苔绿（Moss）。其配色由该插件的配色引擎（OKLCH 色域钳位 + 真实承载面对比度求解）离线烘焙成宿主 `--dsw-*` token 后内置；未安装、未加载该插件本身。
 - 每套配色覆盖 DSH 的 `--dsw-alias-*` / `--dsw-specific-*` / `--dsw-static-*` 语义色 token，并随宿主 `body[data-ds-dark-theme]` 自动明暗切换。
