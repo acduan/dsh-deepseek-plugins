@@ -8,6 +8,7 @@ packages/
   token-daily-stats/     Token 用量统计（设置页）
   cross-review/          交叉复核模式：预设 + 复核工具 + 模型设置页（单一插件）
   dsh-bloom-color/       主题色（仅配色）：默认（DSH） + Bloom 15 套 + dsh-theme-palette 4 套 + 调色板切换器
+  codex-theme/           Codex 外观：29 套 Codex 预设 + 三基色 + 对比度 + 字体（派生算法生成全部语义 token）
 ```
 
 ## 插件
@@ -52,6 +53,19 @@ packages/
 - 纯前端配色：无遥测、无更新检测、无反馈/分享、无玻璃/星空/动效；Node 侧空实现、无网络请求。
 
 细节见 [packages/dsh-bloom-color/README.md](packages/dsh-bloom-color/README.md)。
+
+### 5) codex-theme — `@local/dsh-codex-theme`
+
+**Codex 外观主题**：把 Codex 桌面端的外观模型移植到 DSH。
+
+- **29 套 Codex 主题预设**（Absolutely / Catppuccin / Everforest / GitHub / Gruvbox / Linear / Notion / One / Proof / Tokyo Night 等），预设表取自本机 Codex 构建，同名预设即同一组三基色；
+- **三个基色 + 派生算法**：强调色 / 背景 / 前景一次编辑，其余 elevated 层、control 层、border 三档、次级文字、hover/active、diff、markdown、侧栏、菜单、tooltip、toast、滚动条等约 110 个 token 全部由 Codex 的派生算法算出，改一个颜色整套仍然协调；
+- **对比度 0–100** 统一缩放边框、层次与次级文字强度（默认亮色 45 / 暗色 60）；
+- **界面字体 / 代码字体**，写入 `--dsw-font-family` / `--ds-font-family-code`；
+- 亮色与暗色**分别记忆**；模式复用 DSH 自己的 `ui-theme` 偏好，与「外观」页同步；
+- 设置 → 外观 新增「Codex 外观」分区；配置存 `localStorage`，读取时校验并修复。
+
+细节见 [packages/codex-theme/README.md](packages/codex-theme/README.md)。
 
 ## dsh 插件规范 / 目录结构
 

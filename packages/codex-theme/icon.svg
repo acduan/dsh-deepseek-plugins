@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Codex appearance theme">
+  <!-- Palette chip: Codex's three base colors (accent / ink / surface) as a
+       theme is nothing more than those three values plus a derivation. -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#f9f9f7"/>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="none" stroke="#2d2d2b" stroke-opacity="0.12" stroke-width="1.5"/>
+  <circle cx="24" cy="25" r="12" fill="#cc7d5e"/>
+  <circle cx="40" cy="25" r="12" fill="#2d2d2b" opacity="0.9"/>
+  <circle cx="32" cy="41" r="12" fill="#f9f9f7" stroke="#2d2d2b" stroke-opacity="0.28" stroke-width="1.5"/>
+  <path d="M32 25.5c3.2 0 5.8 2.4 5.8 5.4 0 2.3-1.5 4.2-3.7 5" fill="none" stroke="#2d2d2b" stroke-opacity="0.55" stroke-width="1.6" stroke-linecap="round"/>
+  <circle cx="32" cy="24" r="3.1" fill="#f9f9f7" stroke="#2d2d2b" stroke-opacity="0.5" stroke-width="1.4"/>
+</svg>

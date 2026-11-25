@@ -1,0 +1,6 @@
+# 随包分发的 patch —— 由 package.json 的 dsh.bundle.patch 引用。
+# 纯客户端外观插件：只把自己插入 boot graph，不禁用/不覆盖任何官方插件。
+- insert:
+    - id: codex-theme
+      name: '@local/dsh-codex-theme'
+      config: {}

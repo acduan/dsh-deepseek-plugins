@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Codex appearance theme",
+    "description": "Mirrors the Codex desktop appearance: 29 theme presets (Absolutely, Catppuccin, Everforest, GitHub, Gruvbox, Linear, Notion, One, Proof, Tokyo Night and more) with accent, surface, ink, contrast and font controls. Colors are derived with Codex's own three-color algorithm and mapped onto every DSH semantic token; light and dark are remembered separately."
+  }
+}
